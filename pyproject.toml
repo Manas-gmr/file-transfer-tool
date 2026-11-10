@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "warpsend"
+version = "1.0.0"
+description = "WarpSend — send files at warp speed over TCP/UDP, with progress and SHA-256 checksum verification"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+
+[project.scripts]
+warpsend = "warpsend:main"
+
+[tool.setuptools]
+py-modules = ["warpsend", "server", "client", "utils"]

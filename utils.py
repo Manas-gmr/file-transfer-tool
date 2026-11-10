@@ -11,7 +11,36 @@ Only the standard library is used, so the tool runs with plain
 import hashlib
 import json
 import struct
+import sys
 import zlib
+
+VERSION = "1.0.0"
+
+# WarpSend ASCII logo -- printed by the CLI on every run.
+BANNER = r"""
+██╗    ██╗ █████╗ ██████╗ ██████╗ ███████╗███████╗███╗   ██╗██████╗
+██║    ██║██╔══██╗██╔══██╗██╔══██╗██╔════╝██╔════╝████╗  ██║██╔══██╗
+██║ █╗ ██║███████║██████╔╝██████╔╝███████╗█████╗  ██╔██╗ ██║██║  ██║
+██║███╗██║██╔══██║██╔══██╗██╔═══╝ ╚════██║██╔══╝  ██║╚██╗██║██║  ██║
+╚███╔███╔╝██║  ██║██║  ██║██║     ███████║███████╗██║ ╚████║██████╔╝
+ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚══════╝╚══════╝╚═╝  ╚═══╝╚═════╝
+"""
+
+TAGLINE = "TCP for trust  ·  UDP for speed  ·  SHA-256 verified"
+
+
+def print_banner():
+    """Print the WarpSend logo + tagline (colour when on a terminal)."""
+    if sys.stdout.isatty():
+        cyan = "\033[96m"
+        dim = "\033[90m"
+        reset = "\033[0m"
+        print(f"{cyan}{BANNER}{reset}")
+        print(f"{dim}  {TAGLINE}  ·  v{VERSION}{reset}\n")
+    else:
+        print(BANNER)
+        print(f"  {TAGLINE}  ·  v{VERSION}\n")
+
 
 CHUNK_TCP = 64 * 1024      # 64 KB chunks for TCP
 CHUNK_UDP = 1024           # 1024 bytes of data per UDP packet
