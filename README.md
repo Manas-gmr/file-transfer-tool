@@ -1,4 +1,4 @@
-# WarpSend v1.9.1
+# WarpSend v1.9.2
 
 [![CI](https://github.com/Manas-gmr/file-transfer-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/Manas-gmr/file-transfer-tool/actions/workflows/ci.yml)
 
@@ -18,10 +18,10 @@ TCP or UDP with a live progress bar (speed + ETA), and prove it
 arrived intact with a checksum. Stdlib only — no dependencies
 to install.
 
-v1.9.1 fixes a CI break from v1.9: the TUI module could
-not be imported without Textual, so pytest collected 0
-tests. The module now imports cleanly without it, and CI
-installs the `warpsend[tui]` extra so the pilot test runs.
+v1.9.2 fixes a CI break from the v1.9.1 run: `warpsend
+discover` printed bare peer lines with no header, so the
+discover test rejected a legitimate success when a receiver
+was actually found. It now prints a header line first.
 
 ## Install
 
@@ -77,7 +77,7 @@ UDP mode — same commands with `--mode udp`. Received files land in `./received
 
 ```bash
 warpsend --help            # all commands and options
-warpsend --version         # WarpSend v1.9.1
+warpsend --version         # WarpSend v1.9.2
 warpsend --banner          # print just the logo
 warpsend --verbose send notes.pdf   # also log events to stderr
 warpsend send --help       # options for send

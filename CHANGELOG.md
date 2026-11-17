@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.9.2 -- 17 Nov 2026 (CI fix: discover prints a header)
+
+- **CI run #7 failed on one test: `test_cli_discover`.**
+  36 of 37 passed. The failure: `discover` found a
+  receiver and printed only the peer line, which contains
+  neither "receivers" nor "mDNS", so the test's assertion
+  rejected a legitimate success.
+- **Why a receiver was there at all.** The earlier test
+  `test_announce_failure_does_not_kill_receiver` starts a
+  persistent receiver announcing as "testbox", and it
+  keeps answering mDNS queries for the rest of the pytest
+  process. In the sandbox multicast is blocked, so
+  `discover` found nothing and the test passed; on CI
+  multicast works, so it found "testbox" and the
+  assertion failed. That is a test-environment difference,
+  not a flaky network.
+- **The fix is in the product, not the test.** `warpsend
+  discover` now prints `WarpSend receivers on this
+  network (N found):` before the peer lines, so the output
+  is self-explanatory -- and the test's assertion holds for
+  all three outcomes (found, none found, mDNS
+  unavailable).
+
 ## 1.9.1 -- 17 Nov 2026 (CI fix: TUI imports without Textual)
 
 - **CI was red because the TUI module could not be
@@ -268,8 +291,8 @@ Migration notes (from 1.2.0):
 
 Release steps (maintainer, not automated):
 
-1. Tag the release: `git tag v1.9.1 && git push origin
-   v1.9.1` (or create the tag on the GitHub website --
+1. Tag the release: `git tag v1.9.2 && git push origin
+   v1.9.2` (or create the tag on the GitHub website --
    the GitHub app cannot create tags through the API).
 2. Add `.github/workflows/ci.yml` via the GitHub website
    or a git push from your own machine -- the app cannot

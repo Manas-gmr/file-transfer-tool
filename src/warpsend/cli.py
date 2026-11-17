@@ -517,6 +517,7 @@ def main(argv=None):
         if not found:
             print(f"no WarpSend receivers found on this network (listened {args.timeout:g}s)")
             return 0
+        print(f"WarpSend receivers on this network ({len(found)} found):")
         for p in found:
             print(
                 f"{p['name']}: {p['host']}:{p['port']} {p['mode']}"

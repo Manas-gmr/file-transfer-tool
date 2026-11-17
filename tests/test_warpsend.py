@@ -1,4 +1,4 @@
-"""WarpSend v1.9.1 tests -- run from the project directory:
+"""WarpSend v1.9.2 tests -- run from the project directory:
 
     python3 tests/test_warpsend.py
     python -m pytest tests/ -v
@@ -386,7 +386,7 @@ def test_udp_transfer_and_state_reset():
 def test_package_layout():
     import warpsend
 
-    assert warpsend.__version__ == "1.9.1"
+    assert warpsend.__version__ == "1.9.2"
     assert warpsend.PROTOCOL_VERSION == 3
     # The old flat modules are gone: importing one must fail,
     # so a stale `python3 server.py` cannot silently run old code.
@@ -1150,4 +1150,4 @@ if __name__ == "__main__":
     test_tui_merge_peers()
     test_tui_target_for_peer()
     test_tui_app_send_end_to_end()
-    print("all WarpSend v1.9.1 tests passed")
+    print("all WarpSend v1.9.2 tests passed")
