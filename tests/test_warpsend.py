@@ -1,4 +1,4 @@
-"""WarpSend v1.9 tests -- run from the project directory:
+"""WarpSend v1.9.1 tests -- run from the project directory:
 
     python3 tests/test_warpsend.py
     python -m pytest tests/ -v
@@ -85,6 +85,13 @@ from warpsend.transfer import (
     sha256_of_file,
 )
 from warpsend.tui import WarpSendApp, merge_peers, peer_label, target_for_peer
+
+try:
+    import textual  # noqa: F401
+
+    HAS_TEXTUAL = True
+except ImportError:
+    HAS_TEXTUAL = False
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -379,7 +386,7 @@ def test_udp_transfer_and_state_reset():
 def test_package_layout():
     import warpsend
 
-    assert warpsend.__version__ == "1.9.0"
+    assert warpsend.__version__ == "1.9.1"
     assert warpsend.PROTOCOL_VERSION == 3
     # The old flat modules are gone: importing one must fail,
     # so a stale `python3 server.py` cannot silently run old code.
@@ -1056,6 +1063,9 @@ def test_tui_target_for_peer():
 
 
 def test_tui_app_send_end_to_end():
+    if not HAS_TEXTUAL:
+        print("skip: TUI pilot test needs textual (pip install warpsend[tui])")
+        return
     src_dir = temp_outdir()
     recv_dir = temp_outdir()
     port = free_port()
@@ -1140,4 +1150,4 @@ if __name__ == "__main__":
     test_tui_merge_peers()
     test_tui_target_for_peer()
     test_tui_app_send_end_to_end()
-    print("all WarpSend v1.9 tests passed")
+    print("all WarpSend v1.9.1 tests passed")

@@ -21,6 +21,8 @@ clean. Sends are TCP only (the peer's mode is ignored);
 peers come from the config file and from mDNS discovery.
 """
 
+from __future__ import annotations
+
 import os
 import subprocess
 import sys
@@ -47,8 +49,31 @@ try:
         Log,
         ProgressBar,
     )
+
+    TEXTUAL_AVAILABLE = True
 except ImportError:  # pragma: no cover -- textual is an optional extra
-    App = None  # type: ignore[assignment]
+    TEXTUAL_AVAILABLE = False
+
+    class _StubApp:
+        """Stand-in so this module imports without Textual.
+
+        Instantiating it raises the install hint; the CLI
+        checks TEXTUAL_AVAILABLE before it ever gets here.
+        With `from __future__ import annotations` above, the
+        method annotations below are strings, so only the
+        base class and the BINDINGS list need stand-ins.
+        """
+
+        def __init__(self, *args, **kwargs):
+            raise ImportError("the TUI needs Textual: pip install warpsend[tui]")
+
+    App = _StubApp
+
+    class Binding:
+        """Stand-in so the BINDINGS list can be built."""
+
+        def __init__(self, *args, **kwargs):
+            pass
 
 
 def peer_label(peer):

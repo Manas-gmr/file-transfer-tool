@@ -528,7 +528,7 @@ def main(argv=None):
     if args.command == "tui":
         from . import tui as _tui
 
-        if _tui.App is None:
+        if not _tui.TEXTUAL_AVAILABLE:
             print("the TUI needs Textual: pip install warpsend[tui]")
             return 1
         _tui.WarpSendApp(start_dir=args.dir, port=args.port, outdir=args.outdir).run()

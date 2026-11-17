@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.9.1 -- 17 Nov 2026 (CI fix: TUI imports without Textual)
+
+- **CI was red because the TUI module could not be
+  imported without Textual.** `tui.py` referenced
+  `Binding` at class level, but it only exists when
+  Textual is installed -- and CI never installed it.
+  Pytest collected 0 tests (`NameError: name 'Binding'
+  is not defined`) and every job failed at "Run tests".
+- **The module now imports without Textual.** Stand-ins
+  for the app base class and `Binding`, lazy annotations
+  (`from __future__ import annotations`), and a
+  `TEXTUAL_AVAILABLE` flag the CLI checks before
+  launching the TUI. The pilot test skips cleanly when
+  Textual is absent.
+- **CI installs the TUI extra.** The workflow now runs
+  `pip install -e ".[tui]"`, so the pilot test actually
+  runs on all three OSes instead of skipping.
+
 ## 1.9.0 -- 17 Nov 2026 (Phase 6, part 1: TUI file manager)
 
 - **Textual TUI.** `warpsend tui` opens a file manager:
@@ -250,8 +268,8 @@ Migration notes (from 1.2.0):
 
 Release steps (maintainer, not automated):
 
-1. Tag the release: `git tag v1.9.0 && git push origin
-   v1.9.0` (or create the tag on the GitHub website --
+1. Tag the release: `git tag v1.9.1 && git push origin
+   v1.9.1` (or create the tag on the GitHub website --
    the GitHub app cannot create tags through the API).
 2. Add `.github/workflows/ci.yml` via the GitHub website
    or a git push from your own machine -- the app cannot
