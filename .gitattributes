@@ -1,0 +1,4 @@
+# Normalise line endings to LF on every checkout, on every OS.
+# Without this, Windows checkouts convert files to CRLF, which makes
+# `ruff format --check` fail in CI even though the code is unchanged.
+* text=auto eol=lf
