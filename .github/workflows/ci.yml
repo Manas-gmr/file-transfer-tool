@@ -20,6 +20,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install tools
         run: python -m pip install pytest ruff
+      - name: Install WarpSend with the TUI extra
+        # The TUI tests need Textual; the core stays stdlib-only.
+        run: python -m pip install -e ".[tui]"
       - name: Lint (ruff check + format)
         run: |
           ruff check src tests
