@@ -5,6 +5,8 @@ Public API (stable for the 1.x line):
     warpsend.identity   -- certificates, fingerprints, known hosts
     warpsend.protocol   -- headers, auth, wire constants
     warpsend.transfer   -- send_tcp / send_udp / serve_tcp / serve_udp
+    warpsend.peers      -- saved peers and config file (~/.warpsend/config.toml)
+    warpsend.mdns       -- mDNS discovery (announce + browse, _warpsend._tcp)
     warpsend.config     -- defaults (port, hosts, timeouts)
     warpsend.cli        -- the `warpsend` command (argparse + main)
 

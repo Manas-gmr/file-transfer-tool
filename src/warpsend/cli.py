@@ -1,4 +1,4 @@
-"""WarpSend -- a fast file-transfer CLI over TCP / UDP (v1.5).
+"""WarpSend -- a fast file-transfer CLI over TCP / UDP (v1.6).
 
 One command, two modes:
 
@@ -7,6 +7,13 @@ One command, two modes:
 
     warpsend send    notes.pdf --mode udp
     warpsend receive --mode udp
+
+Saved peers (~/.warpsend/config.toml):
+
+    warpsend peer add laptop 192.168.1.10
+    warpsend peer list
+    warpsend send notes.pdf @laptop
+    warpsend peer remove laptop
 
 Design:
   * TCP -- reliable by default. 256 KB chunks, the OS handles
@@ -28,6 +35,7 @@ Install it as a real command with:
 import argparse
 import logging
 import os
+import socket
 import sys
 
 from .config import VERSION
@@ -36,6 +44,16 @@ from .identity import (
     fingerprint_of_cert_file,
     generate_cert,
     short_code,
+)
+from .mdns import browse, discover_peer, sanitize_instance
+from .peers import (
+    add_peer,
+    default_config_path,
+    load_config,
+    remove_peer,
+    resolve_peer,
+    resolve_target,
+    save_config,
 )
 from .transfer import TransferCancelled, prompt_approve, send_tcp, send_udp, serve_tcp, serve_udp
 
@@ -70,10 +88,11 @@ def _read_key_file(path):
         return f.read().strip()
 
 
-def _key_from(args):
+def _key_from(args, config_key_file=None):
     """Shared secret, safest source first.
 
-    --key-file, then WARPSEND_KEY, then --key (which warns:
+    --key-file, then WARPSEND_KEY, then the key file from the
+    peer or [defaults] in the config, then --key (which warns:
     it shows up in process listings and shell history).
     """
     if getattr(args, "key_file", None):
@@ -81,6 +100,8 @@ def _key_from(args):
     env_key = os.environ.get("WARPSEND_KEY")
     if env_key:
         return env_key
+    if config_key_file:
+        return _read_key_file(config_key_file)
     if getattr(args, "key", None):
         print(
             "warning: --key appears in process listings and shell "
@@ -89,6 +110,31 @@ def _key_from(args):
         )
         return args.key
     return None
+
+
+def _extract_peer(files, peer_flag):
+    """Pull an @name argument out of the file list.
+
+    `warpsend send notes.pdf @laptop` -- the @name is the peer,
+    not a file. --peer wins if both are given; a mismatch, or
+    more than one @name, is an error. A file literally named
+    "@x" must be spelled "./@x" to be sent as a file.
+    """
+    names = [f[1:] for f in files if f.startswith("@")]
+    rest = [f for f in files if not f.startswith("@")]
+    if len(names) > 1:
+        raise ValueError("only one @peer per send")
+    if names and peer_flag and names[0] != peer_flag:
+        raise ValueError(f"--peer {peer_flag!r} conflicts with @{names[0]!r}")
+    return (peer_flag or (names[0] if names else None)), rest
+
+
+def _load_config():
+    """(config, error): the config file, or the reason it failed."""
+    try:
+        return load_config(), None
+    except (OSError, ValueError) as e:
+        return None, e
 
 
 def _add_common(p):
@@ -102,14 +148,22 @@ def _add_common(p):
 
 def _add_mode_args(p):
     p.add_argument(
-        "--mode", choices=["tcp", "udp"], default="tcp", help="transfer mode (default: tcp)"
+        "--mode",
+        choices=["tcp", "udp"],
+        default=None,
+        help="transfer mode (default: peer, [defaults], then tcp)",
     )
-    p.add_argument("--port", type=int, default=5000, help="port to use (default: 5000)")
+    p.add_argument(
+        "--port", type=int, default=None, help="port to use (default: peer, [defaults], then 5000)"
+    )
 
 
 def _add_tls_args(p):
     p.add_argument(
-        "--tls", action="store_true", help="wrap TCP in TLS (server needs a certificate)"
+        "--tls",
+        action="store_true",
+        default=None,
+        help="wrap TCP in TLS (server needs a certificate)",
     )
     p.add_argument(
         "--fingerprint",
@@ -149,17 +203,26 @@ def build_parser():
 
     send = sub.add_parser("send", help="send file(s) to a WarpSend receiver")
     send.add_argument("file", nargs="+", help="file(s) to send")
-    send.add_argument("--host", default="127.0.0.1", help="receiver host (default: 127.0.0.1)")
+    send.add_argument(
+        "--host", default=None, help="receiver host (default: peer, [defaults], then 127.0.0.1)"
+    )
+    send.add_argument(
+        "--peer",
+        default=None,
+        help="saved peer to send to (or pass @name as a file argument)",
+    )
     _add_mode_args(send)
     _add_common(send)
     _add_tls_args(send)
     _add_banner_opt(send)
 
     recv = sub.add_parser("receive", help="wait for files and save them")
-    recv.add_argument("--host", default="0.0.0.0", help="listen host (default: 0.0.0.0)")
+    recv.add_argument(
+        "--host", default=None, help="listen host (default: [defaults], then 0.0.0.0)"
+    )
     _add_mode_args(recv)
     _add_common(recv)
-    recv.add_argument("--tls", action="store_true", help="wrap TCP in TLS")
+    recv.add_argument("--tls", action="store_true", default=None, help="wrap TCP in TLS")
     recv.add_argument(
         "--cert", default=None, help="TLS certificate file (default: ~/.warpsend/cert.pem)"
     )
@@ -186,7 +249,39 @@ def build_parser():
         "(default when stdin is a terminal), auto never asks "
         "(default when stdin is piped, e.g. scripts and CI)",
     )
+    recv.add_argument(
+        "--announce",
+        nargs="?",
+        const="",
+        default=None,
+        help="announce this receiver on the LAN via mDNS, so senders "
+        "can find it by name (default name: this machine's hostname; "
+        "pass a name to use that instead)",
+    )
     _add_banner_opt(recv)
+
+    disc = sub.add_parser("discover", help="find WarpSend receivers on the local network (mDNS)")
+    disc.add_argument(
+        "--timeout", type=float, default=3.0, help="seconds to listen for replies (default: 3)"
+    )
+    _add_banner_opt(disc)
+
+    peer = sub.add_parser("peer", help="manage saved peers (~/.warpsend/config.toml)")
+    peer_sub = peer.add_subparsers(dest="peer_command")
+    peer_add = peer_sub.add_parser("add", help="save a peer")
+    peer_add.add_argument("name", help="peer name (letters, digits, '-', '_')")
+    peer_add.add_argument("host", help="hostname or IP address")
+    peer_add.add_argument("--port", type=int, default=None, help="port (default: 5000)")
+    peer_add.add_argument(
+        "--mode", choices=["tcp", "udp"], default=None, help="mode (default: tcp)"
+    )
+    peer_add.add_argument("--tls", action="store_true", help="this peer uses TLS")
+    peer_add.add_argument("--fingerprint", default=None, help="pinned server TLS fingerprint")
+    peer_add.add_argument("--key-file", default=None, help="file containing the shared secret")
+    peer_sub.add_parser("list", help="list saved peers")
+    peer_rm = peer_sub.add_parser("remove", help="remove a saved peer")
+    peer_rm.add_argument("name", help="peer name")
+    _add_banner_opt(peer)
 
     cert = sub.add_parser("cert", help="generate a self-signed TLS certificate")
     cert.add_argument(
@@ -248,29 +343,151 @@ def main(argv=None):
         print(f"code: {short_code(fp_hex)}")
         return 0
 
+    if args.command == "peer":
+        config, err = _load_config()
+        if err is not None:
+            print(f"could not load config: {err}")
+            return 1
+        path = default_config_path()
+        if args.peer_command == "add":
+            try:
+                add_peer(
+                    config,
+                    args.name,
+                    args.host,
+                    port=args.port,
+                    mode=args.mode,
+                    tls=args.tls,
+                    fingerprint=args.fingerprint,
+                    key_file=args.key_file,
+                )
+                save_config(config, path)
+            except ValueError as e:
+                print(f"cannot add peer: {e}")
+                return 1
+            saved = resolve_peer(config, args.name)
+            print(
+                f"saved peer {args.name!r}: {saved['host']}:{saved.get('port', 5000)} "
+                f"{saved.get('mode', 'tcp')}{' + TLS' if saved.get('tls') else ''} (config: {path})"
+            )
+            return 0
+        if args.peer_command == "remove":
+            try:
+                remove_peer(config, args.name)
+                save_config(config, path)
+            except KeyError as e:
+                print(e)
+                return 1
+            print(f"removed peer {args.name!r}")
+            return 0
+        # list (also the default for a bare `warpsend peer`)
+        peers = config.get("peers", {})
+        if not peers:
+            print(f"no peers saved yet -- `warpsend peer add <name> <host>` (config: {path})")
+        else:
+            for name in sorted(peers):
+                p = peers[name]
+                print(
+                    f"{name}: {p['host']}:{p.get('port', 5000)} "
+                    f"{p.get('mode', 'tcp')}{' + TLS' if p.get('tls') else ''}"
+                )
+        return 0
+
+    if args.command == "discover":
+        try:
+            found = browse(timeout=args.timeout)
+        except OSError as e:
+            print(f"mDNS is not available here: {e}")
+            return 1
+        if not found:
+            print(f"no WarpSend receivers found on this network (listened {args.timeout:g}s)")
+            return 0
+        for p in found:
+            print(
+                f"{p['name']}: {p['host']}:{p['port']} {p['mode']}"
+                f"{' + TLS' if p['tls'] else ''}"
+                f"  (send with: warpsend send <file> @{p['name']})"
+            )
+        return 0
+
     if args.command == "send":
-        missing = [f for f in args.file if not os.path.isfile(f)]
+        config, err = _load_config()
+        if err is not None:
+            print(f"could not load config: {err}")
+            return 1
+        try:
+            peer_name, files = _extract_peer(args.file, args.peer)
+        except ValueError as e:
+            print(f"error: {e}")
+            return 1
+        missing = [f for f in files if not os.path.isfile(f)]
         if missing:
             parser.error(f"file not found: {', '.join(missing)}")
-        key = _key_from(args)
+        try:
+            target = resolve_target(
+                config,
+                peer=peer_name,
+                host=args.host,
+                port=args.port,
+                mode=args.mode,
+                tls=args.tls,
+                fingerprint=args.fingerprint,
+                key_file=args.key_file,
+            )
+            key = _key_from(args, target["key_file"])
+        except KeyError as e:
+            if peer_name is None:
+                print(f"error: {e}")
+                return 1
+            # Not saved -- maybe it is announcing on the LAN.
+            print(f"peer {peer_name!r} is not saved -- looking for it on the LAN ...")
+            try:
+                found = discover_peer(peer_name, timeout=2.5)
+            except OSError as mdns_err:
+                print(f"error: {e} (mDNS unavailable: {mdns_err})")
+                return 1
+            if found is None:
+                print(f"error: {e} (and no receiver named {peer_name!r} answered on the LAN)")
+                return 1
+            print(f"found {peer_name!r} on the LAN at {found['host']}:{found['port']}")
+            try:
+                target = resolve_target(
+                    config,
+                    host=args.host or found["host"],
+                    port=args.port if args.port is not None else found["port"],
+                    mode=args.mode or found["mode"],
+                    tls=args.tls if args.tls is not None else found["tls"],
+                    fingerprint=args.fingerprint or found["fingerprint"],
+                    key_file=args.key_file,
+                )
+                key = _key_from(args, target["key_file"])
+            except (ValueError, OSError) as e2:
+                print(f"error: {e2}")
+                return 1
+        except (ValueError, OSError) as e:
+            print(f"error: {e}")
+            return 1
         failures = 0
         try:
-            for path in args.file:
-                print(f">> sending {path} over {args.mode.upper()} to {args.host}:{args.port}")
-                if args.mode == "tcp":
+            for path in files:
+                print(
+                    f">> sending {path} over {target['mode'].upper()} "
+                    f"to {target['host']}:{target['port']}"
+                )
+                if target["mode"] == "tcp":
                     ok = send_tcp(
-                        args.host,
-                        args.port,
+                        target["host"],
+                        target["port"],
                         path,
                         key=key,
-                        tls=args.tls,
-                        fingerprint=args.fingerprint,
+                        tls=target["tls"],
+                        fingerprint=target["fingerprint"],
                         trust_new=args.trust_new,
                     )
                 else:
-                    if args.tls:
+                    if target["tls"]:
                         print("TLS is TCP-only; UDP sends are not encrypted")
-                    ok = send_udp(args.host, args.port, path, key=key)
+                    ok = send_udp(target["host"], target["port"], path, key=key)
                 if not ok:
                     failures += 1
         except (KeyboardInterrupt, TransferCancelled):
@@ -284,11 +501,27 @@ def main(argv=None):
             return 130
         return 1 if failures else 0
     elif args.command == "receive":
+        config, err = _load_config()
+        if err is not None:
+            print(f"could not load config: {err}")
+            return 1
+        try:
+            target = resolve_target(
+                config,
+                host=args.host,
+                port=args.port,
+                mode=args.mode,
+                tls=args.tls,
+                outdir=args.outdir,
+            )
+            key = _key_from(args, target["key_file"])
+        except (ValueError, OSError) as e:
+            print(f"error: {e}")
+            return 1
         print(
             f">> WarpSend receiver listening on "
-            f"{args.host}:{args.port} over {args.mode.upper()} ..."
+            f"{target['host']}:{target['port']} over {target['mode'].upper()} ..."
         )
-        key = _key_from(args)
         if args.approve == "auto":
             approve = None
         elif args.approve == "prompt":
@@ -297,28 +530,34 @@ def main(argv=None):
             # Default: ask when run in a terminal, never ask when
             # stdin is piped or redirected (scripts, CI).
             approve = prompt_approve if sys.stdin.isatty() else None
-        if args.mode == "tcp":
+        announce = None
+        if args.announce is not None:
+            # Bare --announce uses this machine's hostname.
+            announce = sanitize_instance(args.announce or socket.gethostname())
+        if target["mode"] == "tcp":
             serve_tcp(
-                args.host,
-                args.port,
+                target["host"],
+                target["port"],
                 key=key,
-                tls=args.tls,
+                tls=target["tls"],
                 cert=args.cert,
                 keyfile=args.tls_key,
-                outdir=args.outdir,
+                outdir=target["outdir"],
                 max_size=args.max_size,
                 approve=approve,
+                announce=announce,
             )
         else:
-            if args.tls:
+            if target["tls"]:
                 print("TLS is TCP-only; UDP receives are not encrypted")
             serve_udp(
-                args.host,
-                args.port,
+                target["host"],
+                target["port"],
                 key=key,
-                outdir=args.outdir,
+                outdir=target["outdir"],
                 max_size=args.max_size,
                 approve=approve,
+                announce=announce,
             )
     else:
         parser.print_help()

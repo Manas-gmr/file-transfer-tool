@@ -3,7 +3,7 @@
 WarpSend is a small, stdlib-only file-transfer CLI. One command,
 two modes: `warpsend send` and `warpsend receive`, over TCP or UDP.
 
-## Layout (v1.5)
+## Layout (v1.7)
 
 ```
 src/warpsend/
@@ -14,6 +14,8 @@ src/warpsend/
                     config file may replace these in a future release)
   identity.py    -- certs, fingerprints, known hosts (trust on first use)
   protocol.py    -- wire format: headers, validation, HMAC auth
+  peers.py       -- saved peers and config file (TOML), resolution
+  mdns.py        -- mDNS discovery: DNS packets, announce, browse
   transfer.py    -- send_tcp / send_udp / serve_tcp / serve_udp,
                     hashing, progress, .part files, never-overwrite
 tests/           -- pytest, real servers on localhost in threads
@@ -68,6 +70,51 @@ instead of silently running old code. From a checkout, run
    verdict (0/1), so scripts and CI can react. A decline
    exits 1; a cancel (Ctrl-C) exits 130.
 
+## Peers and config
+
+`peers.py` owns `~/.warpsend/config.toml` (or `WARPSEND_CONFIG`):
+`[defaults]` plus one `[peers.<name>]` table per saved machine.
+Loading validates everything -- unknown keys, bad names,
+bad ports, bad modes, bad fingerprints and peers without a
+host are all rejected with a clear message, so a typo fails
+loudly. Saving is atomic (temp file + rename) and the file
+is written 0600, even though it holds no secrets (only paths
+to key files and fingerprints).
+
+`resolve_target()` merges the four layers -- explicit flag >
+peer > `[defaults]` > built-in -- for host, port, mode, TLS,
+fingerprint, key file and outdir. The CLI resolves once per
+invocation and passes plain values down, so `transfer.py`
+never knows the config exists. `warpsend peer add/list/remove`
+are thin wrappers over `add_peer` / `remove_peer` /
+`save_config`; `@name` on the `send` command line is pulled
+out of the file list by the CLI (`_extract_peer`), with
+`--peer` as the explicit form.
+
+## mDNS discovery
+
+`mdns.py` is a minimal mDNS (RFC 6762) + DNS-SD (RFC 6763)
+implementation in stdlib only. The receiver announces the
+service `_warpsend._tcp.local` with four records -- PTR,
+SRV (hostname + port), TXT (`version`, `mode`, `tls`, and
+the fingerprint when TLS is on) and A (the LAN address) --
+and a daemon thread answers queries for it. The sender
+browses with a single QU question (unicast reply), so the
+browser never binds port 5353; the announcer does, with
+SO_REUSEPORT so it shares the port with Avahi/Bonjour.
+`@peer` on the send command line resolves in this order:
+saved peer, then a ~2.5 s LAN lookup, then a clean error.
+
+The packet layer is deliberately small: names are encoded
+without compression, decoded with compression pointers and
+a loop guard. Nothing about mDNS has been verified on a
+real network -- the sandbox blocks UDP, so the live
+announce+browse test skips there and runs wherever
+multicast is allowed. A failed announce never kills the
+receiver: `start_announcer` returns None on setup failure
+and the announcer thread stops itself on a later send
+failure, printing a warning either way.
+
 ## Cancel
 
 Cancelling is closing the connection. There is deliberately
@@ -119,6 +166,11 @@ to stderr so stdout stays machine-readable.
 * `protocol.py` -- everything about *what bytes mean on the
   wire* (headers, validation, auth tags). Nothing here opens
   a socket or a file.
+* `mdns.py` -- everything about *finding receivers*
+  (DNS packets, announce, browse). It never moves a file.
+* `peers.py` -- everything about *where to send and what the
+  defaults are* (TOML config, peer tables, resolution). It
+  never opens a socket or moves a file.
 * `transfer.py` -- everything about *moving bytes* (both
   modes, both directions). It is the only module that does
   I/O, which is why the session protocol (Phase 4: approval

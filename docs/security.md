@@ -41,6 +41,13 @@
 - **The receiver listens on a port.** Keep it closed when
   you are not transferring. There is no rate limiting or
   IP allow-listing.
+- **Announcing broadcasts that you are here.** A receiver
+  started with `--announce` tells everyone on the LAN its
+  hostname, listening port, WarpSend version and mode.
+  That is the point of discovery, but only announce on a
+  network you trust, and use `--key` (or `--tls`) if the
+  files matter -- an announcer that anyone can see is
+  still an approver that anyone must get past.
 
 ## The 6-digit code is weak -- say so plainly
 
@@ -72,10 +79,12 @@ online and per attempt) is a Phase 6 idea, not done here.
   a file created between the check and the rename cannot be
   silently replaced. Existing files are never overwritten.
 - The private key is written with mode 0600 and the
-  known-hosts file with 0600. The shared secret is never
-  stored in a config file; `--key-file` or `WARPSEND_KEY`
-  only. `--key` itself warns: it shows in process listings
-  and shell history.
+  known-hosts file with 0600. The config file
+  (`~/.warpsend/config.toml`) is also written 0600, even
+  though it holds no secrets -- only paths to key files and
+  fingerprints. The shared secret is never stored in a
+  config file; `--key-file` or `WARPSEND_KEY` only. `--key`
+  itself warns: it shows in process listings and shell history.
 
 ## What to do in practice
 

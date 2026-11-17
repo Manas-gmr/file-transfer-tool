@@ -1,5 +1,75 @@
 # Changelog
 
+## 1.7.0 -- 17 Nov 2026 (Phase 4, part 3: mDNS discovery)
+
+- **mDNS discovery (stdlib only, no zeroconf dependency).**
+  `warpsend receive --announce` announces the receiver on
+  the LAN as `_warpsend._tcp.local` (default name: this
+  machine's hostname; `--announce laptop` uses that name
+  instead). `warpsend discover` lists every WarpSend
+  receiver it hears, with name, host, port and mode.
+- **`@peer` now falls back to the LAN.** `warpsend send
+  file @laptop` first checks the saved peers, then listens
+  for an mDNS announcement from a receiver named `laptop`
+  for ~2.5 s. No saved peer and no typed IP needed.
+- Announcing is safe when mDNS is unavailable: the
+  receiver prints a warning and keeps serving files (a
+  test proves it). Browsing uses QU questions, so the
+  browser needs no port-5353 bind; the announcer shares
+  5353 with Avahi/Bonjour via SO_REUSEPORT.
+- **Tests.** 28 pytest tests (was 21): DNS packet
+  encode/decode roundtrips, compression pointers (and a
+  pointer loop rejected), the query answerer (QU unicast
+  vs multicast replies, other services ignored), a live
+  announce+browse (skips where multicast is blocked),
+  announce-failure not killing the receiver, CLI discover,
+  and the `@peer` LAN fallback failing cleanly.
+
+Migration notes (from 1.6.0):
+
+- No breaking changes. Same commands, same behaviour.
+  Announcing is opt-in (`--announce`); nothing is
+  broadcast unless you ask for it. All 28 tests pass.
+
+## 1.6.0 -- 17 Nov 2026 (Phase 4, part 2: saved peers + config)
+
+- **Saved peers.** `warpsend peer add <name> <host>
+  [--port P] [--mode tcp|udp] [--tls] [--fingerprint HEX]
+  [--key-file PATH]`, `warpsend peer list` and `warpsend
+  peer remove <name>`. Peers live in
+  `~/.warpsend/config.toml` (or wherever `WARPSEND_CONFIG`
+  points), written 0600.
+- **`@peer` sends.** `warpsend send notes.pdf @laptop`
+  sends to the saved peer; `--peer laptop` is the explicit
+  form. A file literally named `@x` must be spelled
+  `./@x`. Only one `@peer` per send.
+- **`[defaults]` in the config.** Default host, port, mode,
+  outdir and key file for both `send` and `receive`.
+  Precedence, highest first: explicit flag > peer >
+  `[defaults]` > built-in (send host 127.0.0.1, receive host
+  0.0.0.0, port 5000, mode tcp, outdir ./received).
+  The config holds no secrets -- only paths to key files
+  and fingerprints. Unknown keys and bad values are
+  rejected on load, so a typo fails loudly.
+- **Python >= 3.11 required** (was >= 3.10): the config
+  reader is stdlib `tomllib`, which arrived in 3.11.
+- **Tests.** 21 pytest tests (was 15): peer roundtrip,
+  validation, precedence, defaults, malformed config, and
+  a CLI end-to-end (peer add/list/send @peer/remove).
+
+Migration notes (from 1.5.0):
+
+- Python 3.10 no longer works: `tomllib` needs 3.11+.
+  CI already tested 3.11/3.12 only, so nothing changes
+  there. Upgrade Python or stay on v1.5.
+- `--host`, `--port`, `--mode` and `--tls` on `send` and
+  `receive` now default to "not given" instead of a fixed
+  value, so a peer or `[defaults]` can supply them. An
+  explicit flag still wins, and with no peer and no config
+  the old defaults apply unchanged.
+- Everything else is unchanged: same commands, same
+  behaviour, all 21 tests pass.
+
 ## 1.5.0 -- 17 Nov 2026 (Phase 4, part 1: approval + cancel)
 
 - **Receiver approval.** `receive` now asks before accepting
@@ -114,8 +184,8 @@ Migration notes (from 1.2.0):
 
 Release steps (maintainer, not automated):
 
-1. Tag the release: `git tag v1.5.0 && git push origin
-   v1.5.0` (or create the tag on the GitHub website --
+1. Tag the release: `git tag v1.7.0 && git push origin
+   v1.7.0` (or create the tag on the GitHub website --
    the GitHub app cannot create tags through the API).
 2. Add `.github/workflows/ci.yml` via the GitHub website
    or a git push from your own machine -- the app cannot

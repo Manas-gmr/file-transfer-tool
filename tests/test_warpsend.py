@@ -1,4 +1,4 @@
-"""WarpSend v1.5 tests -- run from the project directory:
+"""WarpSend v1.7 tests -- run from the project directory:
 
     python3 tests/test_warpsend.py
     python -m pytest tests/ -v
@@ -12,11 +12,19 @@ server's CORRUPT verdict. v1.5 adds: receiver approval
 (accept and decline, TCP and UDP), sender cancel keeping the
 .part with the server staying alive, Ctrl-C exiting 130 with
 no traceback (POSIX only), and protocol v3 enforcement.
-UDP tests run when loopback datagrams are allowed (they are
-on CI runners) and skip gracefully when they are blocked, as
-in this sandbox.
+v1.6 adds: saved peers and config file (add/list/remove,
+@peer sends, flag > peer > defaults > built-in precedence,
+malformed config rejected). v1.7 adds: mDNS discovery --
+packet encode/decode roundtrips, compression pointers, the
+query answerer, a live announce+browse (skips where multicast
+is blocked, as in this sandbox), and proof that a failed
+announce never kills the receiver. UDP tests run when loopback
+datagrams are allowed (they are on CI runners) and skip
+gracefully when they are blocked, as in this sandbox.
 """
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -31,8 +39,30 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
+from warpsend.cli import main
 from warpsend.config import PROTOCOL_VERSION
 from warpsend.identity import generate_cert
+from warpsend.mdns import (
+    SERVICE,
+    TYPE_A,
+    TYPE_PTR,
+    TYPE_SRV,
+    TYPE_TXT,
+    answer_query,
+    browse,
+    build_announcement,
+    build_query,
+    parse_message,
+    start_announcer,
+)
+from warpsend.peers import (
+    add_peer,
+    load_config,
+    remove_peer,
+    resolve_peer,
+    resolve_target,
+    save_config,
+)
 from warpsend.protocol import validate_header
 from warpsend.transfer import (
     TransferCancelled,
@@ -340,7 +370,7 @@ def test_udp_transfer_and_state_reset():
 def test_package_layout():
     import warpsend
 
-    assert warpsend.__version__ == "1.5.0"
+    assert warpsend.__version__ == "1.7.0"
     assert warpsend.PROTOCOL_VERSION == 3
     # The old flat modules are gone: importing one must fail,
     # so a stale `python3 server.py` cannot silently run old code.
@@ -472,6 +502,313 @@ def test_udp_receiver_rejects_when_approval_declines():
     print("ok: UDP receiver approval decline (no file, no .part)")
 
 
+def temp_config_path():
+    return os.path.join(tempfile.mkdtemp(prefix="warpsend-cfg-"), "config.toml")
+
+
+def test_peer_add_list_remove_roundtrip():
+    path = temp_config_path()
+    cfg = load_config(path)
+    assert cfg == {"defaults": {}, "peers": {}}, "missing config file should load empty"
+    add_peer(cfg, "laptop", "192.168.1.10", port=5000, mode="tcp")
+    add_peer(cfg, "pi", "192.168.1.20", tls=True, fingerprint="ab" * 32)
+    save_config(cfg, path)
+    assert oct(os.stat(path).st_mode & 0o777) == "0o600", "config file must be 0600"
+    loaded = load_config(path)
+    assert loaded["peers"]["laptop"] == {"host": "192.168.1.10", "port": 5000, "mode": "tcp"}
+    assert loaded["peers"]["pi"]["tls"] is True
+    assert loaded["peers"]["pi"]["fingerprint"] == "ab" * 32
+    assert resolve_peer(loaded, "laptop")["host"] == "192.168.1.10"
+    remove_peer(loaded, "pi")
+    save_config(loaded, path)
+    assert "pi" not in load_config(path)["peers"]
+    assert "laptop" in load_config(path)["peers"]
+    print("ok: peer add/list/remove roundtrip (0600 config)")
+
+
+def test_peer_validation():
+    cfg = {"defaults": {}, "peers": {}}
+    for bad_name in ("", "a b", "../x", "-x", "a/b"):
+        try:
+            add_peer(cfg, bad_name, "127.0.0.1")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"peer name {bad_name!r} accepted")
+    add_peer(cfg, "ok", "127.0.0.1")
+    try:
+        add_peer(cfg, "ok", "127.0.0.1")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("duplicate peer accepted")
+    for bad in (
+        {"host": "127.0.0.1", "port": 0},
+        {"host": "127.0.0.1", "port": 70000},
+        {"host": "127.0.0.1", "mode": "sctp"},
+        {"host": "127.0.0.1", "fingerprint": "xyz"},
+        {"host": "has space"},
+    ):
+        try:
+            add_peer(cfg, "t", **{k: v for k, v in bad.items() if k != "host"}, host=bad["host"])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"peer fields {bad!r} accepted")
+    try:
+        remove_peer(cfg, "nope")
+    except KeyError as e:
+        assert "ok" in str(e), "unknown-peer error should name the known peers"
+    else:
+        raise AssertionError("removing an unknown peer did not raise")
+    print("ok: peer validation (names, ports, modes, fingerprints, unknown keys)")
+
+
+def test_resolve_target_precedence():
+    cfg = {
+        "defaults": {"host": "10.0.0.1", "port": 6000, "mode": "udp"},
+        "peers": {"laptop": {"host": "192.168.1.10", "port": 5001, "mode": "tcp"}},
+    }
+    # Built-ins only.
+    t = resolve_target({"defaults": {}, "peers": {}})
+    assert (t["host"], t["port"], t["mode"]) == ("127.0.0.1", 5000, "tcp")
+    t = resolve_target({"defaults": {}, "peers": {}}, receive=True)
+    assert t["host"] == "0.0.0.0", "receive default host must be 0.0.0.0"
+    # Defaults fill the gaps.
+    t = resolve_target(cfg)
+    assert (t["host"], t["port"], t["mode"]) == ("10.0.0.1", 6000, "udp")
+    # Peer beats defaults.
+    t = resolve_target(cfg, peer="laptop")
+    assert (t["host"], t["port"], t["mode"]) == ("192.168.1.10", 5001, "tcp")
+    # Explicit flags beat peer and defaults.
+    t = resolve_target(cfg, peer="laptop", host="8.8.8.8", port=7000, mode="udp")
+    assert (t["host"], t["port"], t["mode"]) == ("8.8.8.8", 7000, "udp")
+    # Unknown peer names its known peers.
+    try:
+        resolve_target(cfg, peer="nope")
+    except KeyError as e:
+        assert "laptop" in str(e)
+    else:
+        raise AssertionError("unknown peer did not raise")
+    print("ok: resolve precedence (flag > peer > defaults > built-in)")
+
+
+def test_config_defaults_applied():
+    path = temp_config_path()
+    cfg = {"defaults": {"host": "10.1.1.1", "port": 7001, "mode": "udp"}, "peers": {}}
+    save_config(cfg, path)
+    loaded = load_config(path)
+    t = resolve_target(loaded)
+    assert (t["host"], t["port"], t["mode"]) == ("10.1.1.1", 7001, "udp")
+    print("ok: [defaults] applied on load")
+
+
+def test_malformed_config_rejected():
+    path = temp_config_path()
+    with open(path, "w") as f:
+        f.write("this is [not valid toml")
+    try:
+        load_config(path)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("malformed TOML accepted")
+    with open(path, "w") as f:
+        f.write('[peers.laptop]\nhost = "127.0.0.1"\nbogus = 1\n')
+    try:
+        load_config(path)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unknown key accepted")
+    with open(path, "w") as f:
+        f.write("[peers.laptop]\nport = 5000\n")
+    try:
+        load_config(path)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("peer without a host accepted")
+    print("ok: malformed config rejected (bad TOML, unknown key, missing host)")
+
+
+def test_cli_peer_send_end_to_end():
+    outdir = temp_outdir()
+    port = free_port()
+    start_tcp(port, outdir)
+    cfg_path = temp_config_path()
+    old = os.environ.get("WARPSEND_CONFIG")
+    os.environ["WARPSEND_CONFIG"] = cfg_path
+    try:
+        assert main(["--no-banner", "peer", "add", "local", "127.0.0.1", "--port", str(port)]) == 0
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            assert main(["--no-banner", "peer", "list"]) == 0
+        assert "local" in buf.getvalue() and "127.0.0.1" in buf.getvalue()
+        src = make_file("ws-peer.txt", 5_000)
+        assert main(["--no-banner", "send", src, "@local"]) == 0, "@peer send failed"
+        assert wait_for_file(os.path.join(outdir, "ws-peer.txt"))
+        assert sha256_of_file(os.path.join(outdir, "ws-peer.txt")) == sha256_of_file(src)
+        # Unknown peer: clean failure, exit 1.
+        assert main(["--no-banner", "send", src, "@nope"]) == 1, "unknown peer did not fail"
+        assert main(["--no-banner", "peer", "remove", "local"]) == 0
+        assert "local" not in load_config(cfg_path)["peers"]
+    finally:
+        if old is None:
+            os.environ.pop("WARPSEND_CONFIG", None)
+        else:
+            os.environ["WARPSEND_CONFIG"] = old
+    print("ok: CLI peer add/list/send @peer/remove end to end")
+
+
+def test_mdns_encode_decode_roundtrip():
+    query = build_query()
+    parsed = parse_message(query)
+    assert len(parsed["questions"]) == 1
+    name, qtype, qclass = parsed["questions"][0]
+    assert name == SERVICE and qtype == TYPE_PTR and qclass & 0x8000
+    assert not parsed["answers"]
+
+    txt = {"version": "1.7.0", "mode": "tcp", "tls": "0"}
+    ann = build_announcement("laptop", "laptop", "192.168.1.10", 5000, txt)
+    parsed = parse_message(ann)
+    assert len(parsed["answers"]) == 4
+    by_type = {a[1]: a for a in parsed["answers"]}
+    assert by_type[TYPE_PTR][4] == "laptop." + SERVICE
+    srv = by_type[TYPE_SRV][4]
+    assert srv["port"] == 5000 and srv["target"] == "laptop.local"
+    txt_items = dict(item.split("=", 1) for item in by_type[TYPE_TXT][4])
+    assert txt_items == txt
+    assert by_type[TYPE_A][4] == "192.168.1.10"
+    print("ok: mDNS encode/decode roundtrip (query + PTR/SRV/TXT/A)")
+
+
+def test_mdns_compression_pointer_decode():
+    # A hand-built message: the answer name is a pointer (0xC00C)
+    # back to the question name at offset 12.
+    name = "laptop." + SERVICE
+    question = (
+        b"".join(bytes([len(part)]) + part.encode() for part in name.split("."))
+        + b"\x00"
+        + struct.pack("!HH", TYPE_PTR, 1)
+    )
+    rdata = b"".join(bytes([len(part)]) + part.encode() for part in name.split(".")) + b"\x00"
+    answer = b"\xc0\x0c" + struct.pack("!HHIH", TYPE_PTR, 1, 120, len(rdata)) + rdata
+    msg = struct.pack("!HHHHHH", 0, 0x8400, 1, 1, 0, 0) + question + answer
+    parsed = parse_message(msg)
+    assert parsed["questions"][0][0] == name
+    assert parsed["answers"][0][0] == name
+    assert parsed["answers"][0][4] == name
+    # A pointer loop must not hang.
+    loop = (
+        struct.pack("!HHHHHH", 0, 0x8400, 1, 0, 0, 0)
+        + b"\xc0\x0c"
+        + struct.pack("!HH", TYPE_PTR, 1)
+    )
+    try:
+        parse_message(loop)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("compression pointer loop accepted")
+    print("ok: mDNS compression pointer decode (and loop rejected)")
+
+
+def test_mdns_answer_query():
+    txt = {"version": "1.7.0", "mode": "tcp", "tls": "0"}
+    reply, unicast = answer_query(build_query(), "laptop", "laptop", "192.168.1.10", 5000, txt)
+    assert reply is not None and unicast, "QU question must get a unicast reply"
+    parsed = parse_message(reply)
+    assert len(parsed["answers"]) == 4
+    # A multicast question gets a multicast reply.
+    qm = build_query().replace(b"\x80\x01", b"\x00\x01")
+    reply, unicast = answer_query(qm, "laptop", "laptop", "192.168.1.10", 5000, txt)
+    assert reply is not None and not unicast
+    # A query for another service is ignored; garbage is ignored.
+    assert (
+        answer_query(
+            build_query("_other._tcp.local"), "laptop", "laptop", "192.168.1.10", 5000, txt
+        )[0]
+        is None
+    )
+    assert answer_query(b"garbage", "laptop", "laptop", "192.168.1.10", 5000, txt)[0] is None
+    # A direct SRV question for our instance gets just the SRV record.
+    from warpsend.mdns import encode_name
+
+    srv_q = (
+        struct.pack("!HHHHHH", 0, 0, 1, 0, 0, 0)
+        + encode_name("laptop." + SERVICE)
+        + struct.pack("!HH", TYPE_SRV, 1)
+    )
+    reply, _ = answer_query(srv_q, "laptop", "laptop", "192.168.1.10", 5000, txt)
+    parsed = parse_message(reply)
+    assert len(parsed["answers"]) == 1 and parsed["answers"][0][1] == TYPE_SRV
+    print("ok: mDNS query answerer (PTR all-records, QU unicast, other service ignored)")
+
+
+def test_mdns_browse_live():
+    started = start_announcer("testbox", "127.0.0.1", 5999, mode="tcp")
+    if started is None:
+        print("skip: multicast blocked in this sandbox (runs on CI / your machine)")
+        return
+    _thread, stop = started
+    try:
+        found = browse(timeout=2.0)
+    except OSError:
+        # The announcer bound fine but sending the query is
+        # blocked here (this sandbox); that is a skip, not a fail.
+        print("skip: multicast blocked in this sandbox (runs on CI / your machine)")
+        return
+    finally:
+        stop.set()
+    match = [p for p in found if p["name"] == "testbox"]
+    assert match, f"announced receiver not found: {found}"
+    assert match[0]["port"] == 5999 and match[0]["host"] == "127.0.0.1"
+    print("ok: mDNS live announce + browse found the receiver")
+
+
+def test_announce_failure_does_not_kill_receiver():
+    # In this sandbox mDNS is blocked; the receiver must still
+    # serve files. (On a real network the announcer just works.)
+    outdir = temp_outdir()
+    port = free_port()
+    start_tcp(port, outdir, announce="testbox")
+    src = make_file("ws-announce.txt", 3_000)
+    assert send_tcp("127.0.0.1", port, src)
+    assert wait_for_file(os.path.join(outdir, "ws-announce.txt"))
+    assert sha256_of_file(os.path.join(outdir, "ws-announce.txt")) == sha256_of_file(src)
+    print("ok: receiver serves files even when mDNS announce fails")
+
+
+def test_cli_discover():
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = main(["--no-banner", "discover", "--timeout", "0.2"])
+    out = buf.getvalue()
+    assert rc in (0, 1), f"discover exited {rc}"
+    assert "receivers" in out or "mDNS" in out, f"discover said nothing useful: {out!r}"
+    print("ok: CLI discover runs and reports honestly")
+
+
+def test_cli_send_unknown_peer_falls_back_to_lan():
+    cfg_path = temp_config_path()
+    old = os.environ.get("WARPSEND_CONFIG")
+    os.environ["WARPSEND_CONFIG"] = cfg_path
+    try:
+        src = make_file("ws-ghost.txt", 1_000)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main(["--no-banner", "send", src, "@ghost"])
+        assert rc == 1, "send to a ghost peer should fail"
+        assert "LAN" in buf.getvalue(), f"no LAN fallback mentioned: {buf.getvalue()!r}"
+    finally:
+        if old is None:
+            os.environ.pop("WARPSEND_CONFIG", None)
+        else:
+            os.environ["WARPSEND_CONFIG"] = old
+    print("ok: CLI send to an unknown peer falls back to a LAN lookup, then fails cleanly")
+
+
 if __name__ == "__main__":
     test_package_layout()
     test_fresh_and_no_overwrite()
@@ -488,4 +825,17 @@ if __name__ == "__main__":
     test_sender_cancel_keeps_part_and_server_alive()
     test_ctrl_c_send_exits_130()
     test_udp_receiver_rejects_when_approval_declines()
-    print("all WarpSend v1.5 tests passed")
+    test_peer_add_list_remove_roundtrip()
+    test_peer_validation()
+    test_resolve_target_precedence()
+    test_config_defaults_applied()
+    test_malformed_config_rejected()
+    test_cli_peer_send_end_to_end()
+    test_mdns_encode_decode_roundtrip()
+    test_mdns_compression_pointer_decode()
+    test_mdns_answer_query()
+    test_mdns_browse_live()
+    test_announce_failure_does_not_kill_receiver()
+    test_cli_discover()
+    test_cli_send_unknown_peer_falls_back_to_lan()
+    print("all WarpSend v1.7 tests passed")

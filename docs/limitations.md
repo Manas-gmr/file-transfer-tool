@@ -5,7 +5,7 @@ claim here is tied to a test or to a stated gap -- see the
 comparison doc's warning about README claims that no test
 backs up.
 
-## Verified (tests in `tests/test_warpsend.py`, 15 passing)
+## Verified (tests in `tests/test_warpsend.py`, 28 passing)
 
 - TCP fresh transfer, never-overwrite, resume from `.part`,
   complete `.part` finalised.
@@ -20,6 +20,16 @@ backs up.
 - Sender cancel keeps the `.part` and the server stays
   alive; Ctrl-C exits 130 with no traceback (POSIX only).
 - Protocol v3 is enforced: older versions are rejected.
+- Saved peers and config: add/list/remove roundtrip, peer
+  validation, flag > peer > defaults > built-in precedence,
+  `[defaults]` applied, malformed config rejected, and a CLI
+  end to end (peer add/list/send `@peer`/remove).
+- mDNS discovery: packet encode/decode roundtrips,
+  compression pointers, the query answerer, a live
+  announce+browse, a failed announce not killing the
+  receiver, CLI discover, and the `@peer` LAN fallback --
+  **the live announce+browse only on networks that allow
+  multicast** (see below).
 - UDP transfer and state reset after an abandoned transfer
   -- **on CI only** (see below).
 
@@ -46,19 +56,25 @@ backs up.
 - **No LAN discovery, no relay, no NAT traversal.** Both
   machines must be directly reachable; CGNAT pairs fail
   without IPv6. No firewall automation.
-- **No saved peers / config file.** Host and port are typed
-  every time. (Phase 4, still open.)
 - **No bidirectional session.** Each file is a fresh
   connection from sender to receiver. (Phase 4, still open.)
+- **mDNS is same-subnet only.** Multicast does not cross
+  routers, so discovery finds machines on the same Wi-Fi
+  or LAN segment and nothing beyond it. No goodbye packets
+  are sent on shutdown, so a stopped receiver's entry
+  lingers until its 120 s TTL expires. The live
+  announce+browse path has not been verified on a real
+  network -- only the packet layer and the answerer are
+  tested here.
 - **No expiry for stale `.part` files.** They stay until a
   matching transfer resumes or restarts them. (Phase 4,
   still open.)
 - **The 6-digit code is ~20 bits** -- see docs/security.md.
   It is a convenience check, not authentication.
 - **No mutual TLS.** The server does not verify the client.
-- **Python >= 3.10 required** (the code uses `X | None`
-  annotations). The `openssl` binary is needed for
-  `warpsend cert`.
+- **Python >= 3.11 required** (the code uses `X | None`
+  annotations and stdlib `tomllib` for the config file).
+  The `openssl` binary is needed for `warpsend cert`.
 - **CI runs on every push.** The workflow file
   (`.github/workflows/ci.yml`) is on GitHub since 17 Nov
   2026; the first run failed on Windows (CRLF line endings

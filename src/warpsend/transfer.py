@@ -81,6 +81,7 @@ from .identity import (
     server_tls_context,
     short_code,
 )
+from .mdns import start_announcer
 from .protocol import (
     CHUNK_TCP,
     CHUNK_UDP,
@@ -534,7 +535,16 @@ def _serve_one_tcp(conn, addr, ctx, key, outdir, max_size, approve=None):
 
 
 def serve_tcp(
-    host, port, key=None, tls=False, cert=None, keyfile=None, outdir=None, max_size=0, approve=None
+    host,
+    port,
+    key=None,
+    tls=False,
+    cert=None,
+    keyfile=None,
+    outdir=None,
+    max_size=0,
+    approve=None,
+    announce=None,
 ):
     outdir = outdir or OUTDIR
     os.makedirs(outdir, exist_ok=True)
@@ -553,6 +563,11 @@ def serve_tcp(
         srv.bind((host, port))
         srv.listen(5)
         print(f"TCP server listening on {host}:{port}, saving to {outdir} ... (Ctrl-C to stop)")
+        if announce is not None:
+            if start_announcer(
+                announce, host, port, mode="tcp", tls=tls, fingerprint=fp if tls else None
+            ):
+                print(f"announcing as {announce!r} on the LAN (mDNS _warpsend._tcp)")
         while True:
             try:
                 conn, addr = srv.accept()
@@ -567,7 +582,7 @@ def serve_tcp(
             t.start()
 
 
-def serve_udp(host, port, key=None, outdir=None, max_size=0, approve=None):
+def serve_udp(host, port, key=None, outdir=None, max_size=0, approve=None, announce=None):
     outdir = outdir or OUTDIR
     os.makedirs(outdir, exist_ok=True)
     seen_nonces = set()
@@ -575,6 +590,9 @@ def serve_udp(host, port, key=None, outdir=None, max_size=0, approve=None):
         sock.bind((host, port))
         sock.settimeout(UDP_IDLE_TIMEOUT)
         print(f"UDP server listening on {host}:{port}, saving to {outdir} ... (Ctrl-C to stop)")
+        if announce is not None:
+            if start_announcer(announce, host, port, mode="udp"):
+                print(f"announcing as {announce!r} on the LAN (mDNS _warpsend._tcp)")
         while True:
             # Per-transfer state; a new header resets all of it.
             header, total, sender = None, None, None

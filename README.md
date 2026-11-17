@@ -1,4 +1,4 @@
-# WarpSend v1.5.0
+# WarpSend v1.7.0
 
 [![CI](https://github.com/Manas-gmr/file-transfer-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/Manas-gmr/file-transfer-tool/actions/workflows/ci.yml)
 
@@ -18,13 +18,11 @@ TCP or UDP with a live progress bar (speed + ETA), and prove it
 arrived intact with a checksum. Stdlib only — no dependencies
 to install.
 
-v1.5 adds receiver approval and cancel (Phase 4, part 1):
-the receiver asks before accepting each file (prompt by
-default in a terminal, never when stdin is piped), a decline
-creates no file, and Ctrl-C during a send exits 130 with a
-clean message while the `.part` is kept for resume. The wire
-protocol is now v3 -- both ends must be v1.5+. All 15 tests
-pass.
+v1.7 adds mDNS discovery (Phase 4, part 3), stdlib only:
+`warpsend receive --announce` makes the receiver findable
+on the LAN by name, `warpsend discover` lists receivers,
+and `warpsend send file @laptop` falls back to a LAN lookup
+when the peer is not saved. No IPs at all. All 28 tests pass.
 
 ## Install
 
@@ -50,13 +48,25 @@ warpsend receive --mode tcp --port 5000
 
 # Terminal 2 — sender (several files in one command)
 warpsend send notes.pdf slides.pdf --mode tcp --host 127.0.0.1 --port 5000
+
+# Saved peers — add once, then send with @name
+warpsend peer add laptop 192.168.1.10 --port 5000
+warpsend send notes.pdf @laptop
+warpsend peer list
+warpsend peer remove laptop
+
+# No IPs at all — the receiver announces itself on the LAN
+# Terminal 1 (laptop): warpsend receive --announce
+# Terminal 2: warpsend discover
+#             laptop: 192.168.1.10:5000 tcp
+warpsend send notes.pdf @laptop   # not saved? looked up on the LAN
 ```
 
 UDP mode — same commands with `--mode udp`. Received files land in `./received/` (or `--outdir`).
 
 ```bash
 warpsend --help            # all commands and options
-warpsend --version         # WarpSend v1.5.0
+warpsend --version         # WarpSend v1.7.0
 warpsend --banner          # print just the logo
 warpsend --verbose send notes.pdf   # also log events to stderr
 warpsend send --help       # options for send
@@ -65,12 +75,46 @@ warpsend receive --help    # options for receive
 
 | Command | What it does |
 |---|---|
-| `warpsend send <file...> [--mode tcp\|udp] [--host H] [--port P]` | Send file(s) to a receiver; exit code 1 on failure, 130 on Ctrl-C cancel |
-| `warpsend receive [--mode tcp\|udp] [--host H] [--port P] [--outdir D] [--max-size N] [--approve auto\|prompt]` | Wait for files and save them (until Ctrl-C); asks before accepting each file by default in a terminal |
+| `warpsend send <file...> [--mode tcp\|udp] [--host H] [--port P] [--peer NAME]` | Send file(s) to a receiver; exit code 1 on failure, 130 on Ctrl-C cancel |
+| `warpsend receive [--mode tcp\|udp] [--host H] [--port P] [--outdir D] [--max-size N] [--approve auto\|prompt] [--announce [NAME]]` | Wait for files and save them (until Ctrl-C); asks before accepting each file by default in a terminal; `--announce` advertises the receiver on the LAN via mDNS (default name: hostname) |
+| `warpsend discover [--timeout S]` | List WarpSend receivers announcing on the local network (mDNS) |
+| `warpsend peer add <name> <host> [--port P] [--mode tcp\|udp] [--tls] [--fingerprint HEX] [--key-file PATH]` | Save a peer in `~/.warpsend/config.toml` |
+| `warpsend peer list` | List saved peers |
+| `warpsend peer remove <name>` | Remove a saved peer |
 | `warpsend cert` | Generate a self-signed TLS certificate in `~/.warpsend/` |
 | `warpsend fingerprint [--cert PATH]` | Show a certificate's SHA-256 fingerprint + 6-digit code |
 
 Defaults: `--mode tcp`, `--port 5000`, send host `127.0.0.1`, receive host `0.0.0.0`, outdir `./received`.
+
+## Saved peers and config (`~/.warpsend/config.toml`)
+
+```toml
+[defaults]
+host = "192.168.1.10"
+port = 5000
+mode = "tcp"
+outdir = "~/received"
+key_file = "~/.warpsend/secret.txt"
+
+[peers.laptop]
+host = "192.168.1.10"
+port = 5000
+mode = "tcp"
+tls = true
+fingerprint = "<64 hex chars>"
+key_file = "~/.warpsend/laptop-secret.txt"
+```
+
+Precedence, highest first: an explicit flag (`--host`,
+`--port`, `--mode`, `--tls`, `--fingerprint`, `--key-file`)
+beats the peer, which beats `[defaults]`, which beats the
+built-in default. `WARPSEND_CONFIG` points at a different
+config file. The file holds no secrets -- only paths to key
+files and fingerprints -- but is still written 0600.
+Unknown keys and bad values are rejected on load, so a typo
+fails loudly instead of being silently ignored. A file
+literally named `@x` must be spelled `./@x` when sending,
+since a bare `@name` always means a peer.
 
 ## Security (optional, both sides must agree)
 
@@ -114,10 +158,12 @@ fingerprint. Full details: [docs/security.md](docs/security.md).
 | `src/warpsend/cli.py` | The CLI — `send` / `receive` / `cert` / `fingerprint`, logo, argument parsing, `--verbose` |
 | `src/warpsend/config.py` | Defaults: port, hosts, timeouts (a TOML config file may replace these in a future release) |
 | `src/warpsend/identity.py` | Certificates, fingerprints, known hosts (trust on first use) |
+| `src/warpsend/mdns.py` | mDNS discovery: DNS packet encode/decode, announce (`_warpsend._tcp.local`) and browse |
+| `src/warpsend/peers.py` | Saved peers and config file: TOML load/save, validation, flag > peer > defaults > built-in resolution |
 | `src/warpsend/protocol.py` | Wire format: length-prefixed JSON header, validation, HMAC auth |
 | `src/warpsend/transfer.py` | Sender + receiver engines, both modes; hashing, progress, `.part` files, never-overwrite |
 | `src/warpsend/__main__.py` | `python -m warpsend` |
-| `tests/test_warpsend.py` | pytest suite: fresh transfer, no-overwrite, TCP resume, complete `.part`, auth, TLS + trust-on-first-use, malformed headers, CORRUPT verdict, header validation, UDP transfer + state reset, package layout, receiver approval (accept/decline, TCP + UDP), sender cancel, Ctrl-C exit 130 |
+| `tests/test_warpsend.py` | pytest suite: fresh transfer, no-overwrite, TCP resume, complete `.part`, auth, TLS + trust-on-first-use, malformed headers, CORRUPT verdict, header validation, UDP transfer + state reset, package layout, receiver approval (accept/decline, TCP + UDP), sender cancel, Ctrl-C exit 130, peer add/list/remove roundtrip, peer validation, resolve precedence, defaults, malformed config, CLI `@peer` end to end, mDNS packet roundtrips, compression pointers, query answering, live announce+browse, announce failure not killing the receiver, CLI discover, `@peer` LAN fallback |
 | `.github/workflows/ci.yml` | GitHub Actions: ruff + pytest on Linux, macOS and Windows, Python 3.11/3.12 (see note below) |
 | `LICENSE` | MIT |
 | `pyproject.toml` | Installs the `warpsend` command (`pip install .`); ruff + pytest config |
@@ -187,7 +233,7 @@ python -m pytest tests/ -v
 ruff check src tests && ruff format --check src tests
 ```
 
-15 tests, all passing locally (Nov 17, 2026, ~5 s): fresh
+28 tests, all passing locally (Nov 17, 2026, ~6 s): fresh
 transfer + no-overwrite, TCP resume, complete `.part`
 finalised, auth reject/accept, TLS pinned fingerprint +
 trust-on-first-use + changed-fingerprint abort, malformed
@@ -199,9 +245,22 @@ layout (including a check that no stale flat module is
 importable), receiver approval decline and accept (TCP),
 receiver approval decline (UDP), sender cancel keeping the
 `.part` with the server staying alive, and Ctrl-C during a
-send exiting 130 with no traceback (POSIX only). The UDP
-tests skip gracefully where loopback datagrams are blocked
-(this sandbox) and run on CI, where loopback UDP is allowed.
+send exiting 130 with no traceback (POSIX only), peer
+add/list/remove roundtrip (config written 0600), peer
+validation (names, ports, modes, fingerprints, unknown
+keys), resolve precedence (flag > peer > defaults >
+built-in), `[defaults]` applied on load, malformed config
+rejected (bad TOML, unknown key, peer without a host), and
+a CLI end to end (peer add/list/send `@peer`/remove, unknown
+peer failing cleanly), mDNS packet encode/decode roundtrips,
+compression pointers (and a pointer loop rejected), the
+query answerer (QU unicast vs multicast replies, other
+services ignored), a live announce+browse (skips where
+multicast is blocked), a failed announce not killing the
+receiver, CLI discover, and the `@peer` LAN fallback failing
+cleanly. The UDP and mDNS live tests skip gracefully where
+loopback datagrams or multicast are blocked (this sandbox)
+and run on CI, where loopback UDP is allowed.
 
 ## Known limitations
 
