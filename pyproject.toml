@@ -4,17 +4,35 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "warpsend"
-version = "1.2.0"
+version = "1.3.0"
 description = "WarpSend — send files at warp speed over TCP/UDP, with progress, SHA-256 verification, resume, auth and optional TLS"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [{ name = "Manas Rajput" }]
+
+[project.urls]
+Homepage = "https://github.com/Manas-gmr/file-transfer-tool"
+Repository = "https://github.com/Manas-gmr/file-transfer-tool"
 
 [project.scripts]
-warpsend = "warpsend:main"
+warpsend = "warpsend.cli:main"
 
-[tool.setuptools]
-py-modules = ["warpsend", "server", "client", "utils"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# E/F/I/W/UP: syntax, unused imports, import order, pyupgrade.
+# BLE/PLW/EXE/RUF: blind-except, subprocess check, shebang, __all__.
+# SIM and TRY are deliberately off: SIM105/TRY003/TRY300 fight
+# this codebase's deliberate patterns (explicit try/except
+# around best-effort replies, ValueError as the one validation
+# error, long messages in the one place they are raised).
+select = ["E4", "E7", "E9", "F", "I", "W", "UP", "BLE", "PLW", "EXE", "RUF"]

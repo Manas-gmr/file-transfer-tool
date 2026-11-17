@@ -1,0 +1,65 @@
+# Limitations
+
+Honest limits, with what is verified and what is not. Every
+claim here is tied to a test or to a stated gap -- see the
+comparison doc's warning about README claims that no test
+backs up.
+
+## Verified (tests in `tests/test_warpsend.py`, 10 passing)
+
+- TCP fresh transfer, never-overwrite, resume from `.part`,
+  complete `.part` finalised.
+- Shared-key auth: wrong key rejected, right key accepted.
+- TLS: pinned fingerprint works, untrusted host aborts,
+  changed fingerprint for a known host aborts.
+- Malformed headers (2 GB header claim, bad JSON, missing
+  keys, wrong types) are dropped and the server stays alive.
+- A `CORRUPT` verdict makes the client fail (exit code 1).
+- UDP transfer and state reset after an abandoned transfer
+  -- **on CI only** (see below).
+
+## Not verified here
+
+- **UDP on a real network.** Datagrams are blocked in this
+  sandbox, so the UDP tests skip here and run on CI, where
+  loopback UDP is allowed. Run the UDP commands on your own
+  machine before trusting them.
+- **Windows and macOS.** CI runs pytest on Linux, macOS and
+  Windows, but only once the workflow file is on GitHub (see
+  below). Nothing here has been run on Windows or macOS yet.
+
+## Known limitations
+
+- **UDP is stop-and-wait with 1 KB packets** -- about
+  20 KB/s at 50 ms RTT regardless of bandwidth. A sliding
+  window is the biggest remaining performance item and needs
+  a loss/latency simulator to measure properly.
+- **No folder sending**, no parallel streams, no compression.
+- **No LAN discovery, no relay, no NAT traversal.** Both
+  machines must be directly reachable; CGNAT pairs fail
+  without IPv6. No firewall automation.
+- **No receiver-side approval.** Any sender that passes the
+  (optional) key can push a file.
+- **No saved peers / config file.** Host and port are typed
+  every time. (Phase 4.)
+- **No bidirectional session.** Each file is a fresh
+  connection from sender to receiver. (Phase 4.)
+- **No per-file cancel** without ending the run. (Phase 4.)
+- **No expiry for stale `.part` files.** They stay until a
+  matching transfer resumes or restarts them. (Phase 4.)
+- **The 6-digit code is ~20 bits** -- see docs/security.md.
+  It is a convenience check, not authentication.
+- **No mutual TLS.** The server does not verify the client.
+- **Python >= 3.10 required** (the code uses `X | None`
+  annotations). The `openssl` binary is needed for
+  `warpsend cert`.
+- **CI is not running yet.** The workflow file
+  (`.github/workflows/ci.yml`) exists in this checkout but
+  could not be pushed by the GitHub app, which cannot create
+  workflow files through the API. Add it via the GitHub web
+  UI or a git push from your own machine; until then the CI
+  badge in the README proves nothing.
+- **Not on PyPI yet.** The name `warpsend` was checked on
+  17 Nov 2026 and does not exist on PyPI, so it is free to
+  claim -- but no release has been published. See
+  CHANGELOG.md for the release steps.

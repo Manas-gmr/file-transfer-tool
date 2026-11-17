@@ -1,4 +1,4 @@
-"""WarpSend v1.2 tests -- run from the project directory:
+"""WarpSend v1.3 tests -- run from the project directory:
 
     python3 tests/test_warpsend.py
     python -m pytest tests/ -v
@@ -12,6 +12,7 @@ server's CORRUPT verdict. UDP tests run when loopback
 datagrams are allowed (they are on CI runners) and skip
 gracefully when they are blocked, as in this sandbox.
 """
+
 import json
 import os
 import shutil
@@ -22,12 +23,22 @@ import tempfile
 import threading
 import time
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from client import send_tcp, send_udp  # noqa: E402
-from server import serve_tcp, serve_udp  # noqa: E402
-from utils import (generate_cert, part_path, progress, resume_offset,  # noqa: E402
-                   save_meta, sha256_of_file, validate_header)
+from warpsend.identity import generate_cert
+from warpsend.protocol import validate_header
+from warpsend.transfer import (
+    part_path,
+    progress,
+    resume_offset,
+    save_meta,
+    send_tcp,
+    send_udp,
+    serve_tcp,
+    serve_udp,
+    sha256_of_file,
+)
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -59,9 +70,9 @@ def temp_outdir():
 
 
 def start_tcp(port, outdir, **kwargs):
-    threading.Thread(target=serve_tcp, args=("127.0.0.1", port),
-                     kwargs={"outdir": outdir, **kwargs},
-                     daemon=True).start()
+    threading.Thread(
+        target=serve_tcp, args=("127.0.0.1", port), kwargs={"outdir": outdir, **kwargs}, daemon=True
+    ).start()
     time.sleep(0.3)
 
 
@@ -123,19 +134,16 @@ def test_auth_reject():
     port = free_port()
     start_tcp(port, outdir, key="correct-horse")
     src = make_file("ws-auth.txt", 1_000)
-    assert not send_tcp("127.0.0.1", port, src, key="wrong-key"), \
-        "server accepted a wrong key"
+    assert not send_tcp("127.0.0.1", port, src, key="wrong-key"), "server accepted a wrong key"
     assert not os.path.exists(os.path.join(outdir, "ws-auth.txt"))
-    assert send_tcp("127.0.0.1", port, src, key="correct-horse"), \
-        "server rejected the right key"
+    assert send_tcp("127.0.0.1", port, src, key="correct-horse"), "server rejected the right key"
     assert wait_for_file(os.path.join(outdir, "ws-auth.txt"))
     print("ok: shared-key auth (reject wrong, accept right)")
 
 
 def _tls_server(port, outdir):
     tmp = tempfile.mkdtemp()
-    cert, keyfile, fp = generate_cert(os.path.join(tmp, "cert.pem"),
-                                      os.path.join(tmp, "key.pem"))
+    cert, keyfile, fp = generate_cert(os.path.join(tmp, "cert.pem"), os.path.join(tmp, "key.pem"))
     start_tcp(port, outdir, tls=True, cert=cert, keyfile=keyfile)
     return fp, os.path.join(tmp, "known_hosts.json")
 
@@ -146,28 +154,29 @@ def test_tls_pinned_and_tofu():
     fp, known = _tls_server(port, outdir)
     src = make_file("ws-tls.txt", 50_000, byte=b"T")
     # No fingerprint, no --trust-new: must abort, nothing saved.
-    assert not send_tcp("127.0.0.1", port, src, tls=True,
-                        known_hosts_path=known), \
+    assert not send_tcp("127.0.0.1", port, src, tls=True, known_hosts_path=known), (
         "TLS sent a file to an unverified host"
+    )
     assert not os.path.exists(os.path.join(outdir, "ws-tls.txt"))
     # Wrong fingerprint: abort.
-    assert not send_tcp("127.0.0.1", port, src, tls=True,
-                        fingerprint="00" * 32, known_hosts_path=known), \
-        "TLS accepted a bad fingerprint"
+    assert not send_tcp(
+        "127.0.0.1", port, src, tls=True, fingerprint="00" * 32, known_hosts_path=known
+    ), "TLS accepted a bad fingerprint"
     # Right fingerprint: succeeds and remembers the host.
-    assert send_tcp("127.0.0.1", port, src, tls=True, fingerprint=fp,
-                    known_hosts_path=known), \
+    assert send_tcp("127.0.0.1", port, src, tls=True, fingerprint=fp, known_hosts_path=known), (
         "TLS failed with the right fingerprint"
+    )
     assert wait_for_file(os.path.join(outdir, "ws-tls.txt"))
     assert sha256_of_file(os.path.join(outdir, "ws-tls.txt")) == sha256_of_file(src)
-    assert json.load(open(known)).get("127.0.0.1") == fp
+    with open(known) as f:
+        assert json.load(f).get("127.0.0.1") == fp
     # A changed cert for the same host must now abort loudly.
     port2 = free_port()
     fp2, _ = _tls_server(port2, temp_outdir())
     assert fp2 != fp
-    assert not send_tcp("127.0.0.1", port2, src, tls=True,
-                        known_hosts_path=known), \
+    assert not send_tcp("127.0.0.1", port2, src, tls=True, known_hosts_path=known), (
         "TLS accepted a changed fingerprint for a known host"
+    )
     print("ok: TLS pinned fingerprint + trust-on-first-use")
 
 
@@ -181,7 +190,7 @@ def test_malformed_header_keeps_server_alive():
             s.settimeout(2)
             try:
                 s.recv(128)  # the CHALLENGE line; ignore it
-            except socket.timeout:
+            except TimeoutError:
                 pass
             s.sendall(payload)
 
@@ -189,10 +198,11 @@ def test_malformed_header_keeps_server_alive():
     raw(struct.pack("!I", 2_000_000_000))
     # Bad JSON, missing keys, wrong types.
     raw(struct.pack("!I", 8) + b"not json")
-    raw(struct.pack("!I", len(b'{"filename": "x"}'))
-        + b'{"filename": "x"}')
-    raw(struct.pack("!I", len(b'{"filename": "x", "filesize": "big", "checksum": "00"}'))
-        + b'{"filename": "x", "filesize": "big", "checksum": "00"}')
+    raw(struct.pack("!I", len(b'{"filename": "x"}')) + b'{"filename": "x"}')
+    raw(
+        struct.pack("!I", len(b'{"filename": "x", "filesize": "big", "checksum": "00"}'))
+        + b'{"filename": "x", "filesize": "big", "checksum": "00"}'
+    )
     time.sleep(0.3)
     # The server must still be alive for a normal transfer.
     src = make_file("ws-alive.txt", 5_000)
@@ -235,23 +245,23 @@ def test_corrupt_verdict_is_failure():
     threading.Thread(target=fake_server, daemon=True).start()
     time.sleep(0.3)
     src = make_file("ws-corrupt.txt", 10_000)
-    assert not send_tcp("127.0.0.1", port, src), \
-        "client reported success on a CORRUPT verdict"
+    assert not send_tcp("127.0.0.1", port, src), "client reported success on a CORRUPT verdict"
     print("ok: CORRUPT verdict -> client failure (exit code 1)")
 
 
 def test_validate_header():
-    good = validate_header({"filename": "a.txt", "filesize": 10,
-                            "checksum": "ab" * 32})
+    good = validate_header({"filename": "a.txt", "filesize": 10, "checksum": "ab" * 32})
     assert good["filename"] == "a.txt" and good["filesize"] == 10
-    for bad in ({}, {"filename": "a.txt"},
-                {"filename": "", "filesize": 1, "checksum": "ab" * 32},
-                {"filename": "..", "filesize": 1, "checksum": "ab" * 32},
-                {"filename": "a.txt", "filesize": -1, "checksum": "ab" * 32},
-                {"filename": "a.txt", "filesize": "10", "checksum": "ab" * 32},
-                {"filename": "a.txt", "filesize": 1, "checksum": "xyz"},
-                {"filename": "a.txt", "filesize": 1, "checksum": "ab" * 32,
-                 "protocol": 99}):
+    for bad in (
+        {},
+        {"filename": "a.txt"},
+        {"filename": "", "filesize": 1, "checksum": "ab" * 32},
+        {"filename": "..", "filesize": 1, "checksum": "ab" * 32},
+        {"filename": "a.txt", "filesize": -1, "checksum": "ab" * 32},
+        {"filename": "a.txt", "filesize": "10", "checksum": "ab" * 32},
+        {"filename": "a.txt", "filesize": 1, "checksum": "xyz"},
+        {"filename": "a.txt", "filesize": 1, "checksum": "ab" * 32, "protocol": 99},
+    ):
         try:
             validate_header(bad)
         except ValueError:
@@ -279,24 +289,33 @@ def test_udp_transfer_and_state_reset():
         return
     outdir = temp_outdir()
     port = free_port()
-    threading.Thread(target=serve_udp, args=("127.0.0.1", port),
-                     kwargs={"outdir": outdir}, daemon=True).start()
+    threading.Thread(
+        target=serve_udp, args=("127.0.0.1", port), kwargs={"outdir": outdir}, daemon=True
+    ).start()
     time.sleep(0.3)
     # Abandon a transfer midway (header + one chunk, no EOF).
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.settimeout(2)
-        header = json.dumps({"filename": "ws-abandoned.txt", "filesize": 5000,
-                             "checksum": "ab" * 32, "protocol": 2,
-                             "nonce": "n1"}).encode()
+        header = json.dumps(
+            {
+                "filename": "ws-abandoned.txt",
+                "filesize": 5000,
+                "checksum": "ab" * 32,
+                "protocol": 2,
+                "nonce": "n1",
+            }
+        ).encode()
         s.sendto(b"\x00" + header, ("127.0.0.1", port))
         try:
             s.recvfrom(64)  # header ACK
-        except socket.timeout:
+        except TimeoutError:
             pass
         import zlib
+
         chunk = b"A" * 1024
-        s.sendto(b"\x01" + struct.pack("!III", 0, 5, zlib.crc32(chunk))
-                 + chunk, ("127.0.0.1", port))
+        s.sendto(
+            b"\x01" + struct.pack("!III", 0, 5, zlib.crc32(chunk)) + chunk, ("127.0.0.1", port)
+        )
     # A full transfer of a different file must not pick up the
     # abandoned file's chunks.
     src = make_file("ws-udp.txt", 5_000, byte=b"U")
@@ -307,7 +326,24 @@ def test_udp_transfer_and_state_reset():
     print("ok: UDP transfer + state reset after abandoned transfer")
 
 
+def test_package_layout_and_legacy_shims():
+    import warpsend
+
+    assert warpsend.__version__ == "1.3.0"
+    assert warpsend.PROTOCOL_VERSION == 2
+    # The old flat imports still work (they are thin shims now).
+    from client import send_tcp as legacy_send_tcp
+    from server import serve_tcp as legacy_serve_tcp
+    from utils import VERSION as legacy_version
+
+    assert legacy_send_tcp is send_tcp
+    assert legacy_serve_tcp is serve_tcp
+    assert legacy_version == "1.3.0"
+    print("ok: src/warpsend layout + legacy shims")
+
+
 if __name__ == "__main__":
+    test_package_layout_and_legacy_shims()
     test_fresh_and_no_overwrite()
     test_resume()
     test_complete_part_finalised()
@@ -317,4 +353,4 @@ if __name__ == "__main__":
     test_corrupt_verdict_is_failure()
     test_validate_header()
     test_udp_transfer_and_state_reset()
-    print("all WarpSend v1.2 tests passed")
+    print("all WarpSend v1.3 tests passed")

@@ -1,4 +1,4 @@
-# WarpSend v1.2.0
+# WarpSend v1.3.0
 
 [![CI](https://github.com/Manas-gmr/file-transfer-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/Manas-gmr/file-transfer-tool/actions/workflows/ci.yml)
 
@@ -18,12 +18,11 @@ TCP or UDP with a live progress bar (speed + ETA), and prove it
 arrived intact with a checksum. Stdlib only — no dependencies
 to install.
 
-v1.2 applies the 17 Nov 2026 code review (Phases 1–2, plus the
-cheap performance fixes): header validation and size limits,
-a crash-proof receiver, exit codes that follow the server's
-verdict, thread-per-connection TCP with timeouts, challenge–
-response auth, TLS 1.2 with trust-on-first-use, `--outdir`,
-`--key-file`, `--max-size`, and a protocol version in the header.
+v1.3 is the Phase 3 release: the code moved into a proper
+`src/warpsend/` package (identity / protocol / transfer /
+config / cli), with `docs/`, ruff linting, `--verbose`
+logging and a changelog. Behaviour is unchanged from v1.2 --
+all 10 tests pass.
 
 ## Install
 
@@ -31,12 +30,14 @@ response auth, TLS 1.2 with trust-on-first-use, `--outdir`,
 git clone https://github.com/Manas-gmr/file-transfer-tool.git
 cd file-transfer-tool
 
-# Run it directly, no install needed:
-python3 warpsend.py send notes.pdf
-
-# Or install it as a real command:
+# Install it as a real command:
 pip install .
 warpsend send notes.pdf
+
+# Or, from a checkout without installing:
+pip install -e .
+warpsend send notes.pdf
+# or: PYTHONPATH=src python -m warpsend send notes.pdf
 ```
 
 ## Usage
@@ -53,8 +54,9 @@ UDP mode — same commands with `--mode udp`. Received files land in `./received
 
 ```bash
 warpsend --help            # all commands and options
-warpsend --version         # WarpSend v1.2.0
+warpsend --version         # WarpSend v1.3.0
 warpsend --banner          # print just the logo
+warpsend --verbose send notes.pdf   # also log events to stderr
 warpsend send --help       # options for send
 warpsend receive --help    # options for receive
 ```
@@ -91,22 +93,33 @@ warpsend send notes.pdf --tls --trust-new
 - **Protected:** file integrity — SHA-256 over the whole file, verified before rename, plus CRC32 per UDP chunk. Authenticated headers — HMAC-SHA256 over filename, size, checksum *and* a per-connection nonce (the server's random TCP challenge, or a fresh client nonce for UDP that the server rejects on replay). Confidentiality — only with `--tls` (TLS 1.2 minimum, self-signed cert, fingerprint pinned or remembered per host in `~/.warpsend/known_hosts.json`; a changed fingerprint aborts).
 - **Not protected:** without `--tls`, file contents travel in plaintext and anyone on the path can read them; the HMAC only proves the sender knew the key, and the final SHA-256 is the only check on the bytes themselves. Without `--key`, anyone who can reach the port can push a file. The server does not verify the *client's* certificate. UDP has no TLS and no encryption at all. A trusted session can still push files without per-file approval — only receive from peers you trust. The receiver never overwrites, but it does listen on a port: keep it closed when you are not transferring.
 
+The 6-digit code is only ~20 bits -- a convenience check for
+the first connect, never a replacement for the full
+fingerprint. Full details: [docs/security.md](docs/security.md).
+
+## Docs
+
+- [docs/architecture.md](docs/architecture.md) — layout, the transfer step by step, resume, concurrency, logging
+- [docs/security.md](docs/security.md) — threat model, the 6-digit-code weakness, header/file handling, practice
+- [docs/limitations.md](docs/limitations.md) — what is verified, what is not, known limits (including CI and PyPI status)
+- [docs/advantages.md](docs/advantages.md) — why WarpSend, why not, provenance
+- [CHANGELOG.md](CHANGELOG.md) — release history and migration notes
+
 ## Files
 
-| File | What it does |
+| Path | What it does |
 |---|---|
-| `warpsend.py` | The CLI — `send` / `receive` / `cert` / `fingerprint`, logo, argument parsing |
-| `utils.py` | SHA-256 of a whole file, CRC32 per chunk, progress bar (speed + ETA, stderr), length-prefixed JSON header, header validation, HMAC auth, `.part`/resume metadata, never-overwrite naming (atomic hard-link claim), TLS cert + fingerprint + known-hosts helpers, ASCII logo |
-| `server.py` | Receiver engine — thread-per-connection TCP, UDP with sender binding and idle timeout, saves to the outdir, verifies SHA-256, replies OK / CORRUPT (TCP) or SUCCESS / FAIL (UDP) |
-| `client.py` | Sender engine — sends file(s) in TCP (sendfile) or UDP mode with a live progress bar; exit code follows the server's verdict |
-| `tests/test_warpsend.py` | pytest suite: fresh transfer, no-overwrite, TCP resume, complete `.part`, auth, TLS + trust-on-first-use, malformed headers, CORRUPT verdict, header validation, UDP transfer + state reset |
-| `.github/workflows/ci.yml` | GitHub Actions: pytest on Linux, macOS and Windows, Python 3.11/3.12 |
+| `src/warpsend/cli.py` | The CLI — `send` / `receive` / `cert` / `fingerprint`, logo, argument parsing, `--verbose` |
+| `src/warpsend/config.py` | Defaults: port, hosts, timeouts (a TOML config file will replace these in Phase 4) |
+| `src/warpsend/identity.py` | Certificates, fingerprints, known hosts (trust on first use) |
+| `src/warpsend/protocol.py` | Wire format: length-prefixed JSON header, validation, HMAC auth |
+| `src/warpsend/transfer.py` | Sender + receiver engines, both modes; hashing, progress, `.part` files, never-overwrite |
+| `src/warpsend/__main__.py` | `python -m warpsend` |
+| `server.py`, `client.py`, `utils.py` | Thin legacy shims over the package (old imports still work) |
+| `tests/test_warpsend.py` | pytest suite: fresh transfer, no-overwrite, TCP resume, complete `.part`, auth, TLS + trust-on-first-use, malformed headers, CORRUPT verdict, header validation, UDP transfer + state reset, package layout + shims |
+| `.github/workflows/ci.yml` | GitHub Actions: ruff + pytest on Linux, macOS and Windows, Python 3.11/3.12 (see note below) |
 | `LICENSE` | MIT |
-| `pyproject.toml` | Installs the `warpsend` command (`pip install .`) |
-
-The old scripts still work directly if you prefer them:
-`python3 server.py --mode tcp --port 5000` and
-`python3 client.py --mode tcp --file notes.pdf`.
+| `pyproject.toml` | Installs the `warpsend` command (`pip install .`); ruff + pytest config |
 
 ## How it works
 
@@ -156,45 +169,52 @@ packet is lost. An EOF with chunks missing replies FAIL and
 keeps the `.part`. UDP has no resume: a failed UDP transfer
 restarts from the start.
 
-**Compatibility:** headers carry `protocol: 2`. A v1.2 client
+**Compatibility:** headers carry `protocol: 2`. A v1.3 client
 talking to a pre-v1.2 server falls back to a nonce-less HMAC
-after a short wait for the challenge that never comes; a v1.2
+after a short wait for the challenge that never comes; a v1.3
 server accepts older clients (challenge-response auth needs
-v1.2 on both sides to protect against replay).
+v1.2+ on both sides to protect against replay).
 
 ## Tests
 
 ```bash
 python -m pytest tests/ -v
+ruff check src tests && ruff format --check src tests
 ```
 
-9 tests, all passing locally (Nov 17, 2026, 3.4 s): fresh
+10 tests, all passing locally (Nov 17, 2026, ~4 s): fresh
 transfer + no-overwrite, TCP resume, complete `.part`
 finalised, auth reject/accept, TLS pinned fingerprint +
 trust-on-first-use + changed-fingerprint abort, malformed
 headers (2 GB header claim, bad JSON, missing keys, wrong
 types) with the server staying alive, CORRUPT verdict giving
-a client failure, header validation, and UDP transfer +
-state reset after an abandoned transfer. The UDP test skips
-gracefully where loopback datagrams are blocked (this
-sandbox) and runs on CI, where loopback UDP is allowed.
+a client failure, header validation, UDP transfer +
+state reset after an abandoned transfer, and the package
+layout + legacy shims. The UDP test skips gracefully where
+loopback datagrams are blocked (this sandbox) and runs on
+CI, where loopback UDP is allowed.
 
 ## Known limitations
 
 - UDP is stop-and-wait with 1 KB packets — about 20 KB/s at
-  50 ms RTT regardless of bandwidth. A sliding window (the
-  review's P1) is the biggest remaining performance item and
-  is deliberately not in v1.2: it needs a loss/latency
-  simulator to measure properly, and UDP cannot be exercised
-  in this sandbox.
+  50 ms RTT regardless of bandwidth. A sliding window is the
+  biggest remaining performance item (Phase 5).
 - No folder sending, no parallel streams, no compression,
   no LAN discovery, no relay/NAT traversal, no client
   certificate (mutual TLS), no per-file approval prompt.
-- Flat module layout (`utils.py` etc. with a `sys.path`
-  insert) is kept for v1.2; the `src/warpsend/` package
-  move, plus ruff/mypy, is still to do.
+- CI is not running yet: the workflow file exists in this
+  checkout but the GitHub app cannot create workflow files
+  through the API, so it must be added via the GitHub web UI
+  or a git push from your machine. Until then the badge above
+  proves nothing.
+- Not on PyPI yet: the name `warpsend` was checked on
+  17 Nov 2026 and does not exist, so it is free to claim.
+  Release steps (tag, CI file, PyPI upload) are in
+  [CHANGELOG.md](CHANGELOG.md).
 - UDP is still unverified on a real network from here —
   run the UDP commands on your own machine to verify them.
+
+Full list: [docs/limitations.md](docs/limitations.md).
 
 ## Try yourself
 
