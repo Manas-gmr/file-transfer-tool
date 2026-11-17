@@ -1,4 +1,4 @@
-# WarpSend v1.4.0
+# WarpSend v1.5.0
 
 [![CI](https://github.com/Manas-gmr/file-transfer-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/Manas-gmr/file-transfer-tool/actions/workflows/ci.yml)
 
@@ -18,9 +18,13 @@ TCP or UDP with a live progress bar (speed + ETA), and prove it
 arrived intact with a checksum. Stdlib only — no dependencies
 to install.
 
-v1.4 is a cleanup release: the legacy top-level shims are gone,
-so the repository is just the package, the tests and the docs.
-Behaviour is unchanged from v1.3 -- all 10 tests pass.
+v1.5 adds receiver approval and cancel (Phase 4, part 1):
+the receiver asks before accepting each file (prompt by
+default in a terminal, never when stdin is piped), a decline
+creates no file, and Ctrl-C during a send exits 130 with a
+clean message while the `.part` is kept for resume. The wire
+protocol is now v3 -- both ends must be v1.5+. All 15 tests
+pass.
 
 ## Install
 
@@ -52,7 +56,7 @@ UDP mode — same commands with `--mode udp`. Received files land in `./received
 
 ```bash
 warpsend --help            # all commands and options
-warpsend --version         # WarpSend v1.4.0
+warpsend --version         # WarpSend v1.5.0
 warpsend --banner          # print just the logo
 warpsend --verbose send notes.pdf   # also log events to stderr
 warpsend send --help       # options for send
@@ -61,8 +65,8 @@ warpsend receive --help    # options for receive
 
 | Command | What it does |
 |---|---|
-| `warpsend send <file...> [--mode tcp\|udp] [--host H] [--port P]` | Send file(s) to a receiver; exit code 1 on failure |
-| `warpsend receive [--mode tcp\|udp] [--host H] [--port P] [--outdir D] [--max-size N]` | Wait for files and save them (until Ctrl-C) |
+| `warpsend send <file...> [--mode tcp\|udp] [--host H] [--port P]` | Send file(s) to a receiver; exit code 1 on failure, 130 on Ctrl-C cancel |
+| `warpsend receive [--mode tcp\|udp] [--host H] [--port P] [--outdir D] [--max-size N] [--approve auto\|prompt]` | Wait for files and save them (until Ctrl-C); asks before accepting each file by default in a terminal |
 | `warpsend cert` | Generate a self-signed TLS certificate in `~/.warpsend/` |
 | `warpsend fingerprint [--cert PATH]` | Show a certificate's SHA-256 fingerprint + 6-digit code |
 
@@ -89,7 +93,7 @@ warpsend send notes.pdf --tls --trust-new
 ### Threat model — what is and is not protected
 
 - **Protected:** file integrity — SHA-256 over the whole file, verified before rename, plus CRC32 per UDP chunk. Authenticated headers — HMAC-SHA256 over filename, size, checksum *and* a per-connection nonce (the server's random TCP challenge, or a fresh client nonce for UDP that the server rejects on replay). Confidentiality — only with `--tls` (TLS 1.2 minimum, self-signed cert, fingerprint pinned or remembered per host in `~/.warpsend/known_hosts.json`; a changed fingerprint aborts).
-- **Not protected:** without `--tls`, file contents travel in plaintext and anyone on the path can read them; the HMAC only proves the sender knew the key, and the final SHA-256 is the only check on the bytes themselves. Without `--key`, anyone who can reach the port can push a file. The server does not verify the *client's* certificate. UDP has no TLS and no encryption at all. A trusted session can still push files without per-file approval — only receive from peers you trust. The receiver never overwrites, but it does listen on a port: keep it closed when you are not transferring.
+- **Not protected:** without `--tls`, file contents travel in plaintext and anyone on the path can read them; the HMAC only proves the sender knew the key, and the final SHA-256 is the only check on the bytes themselves. Without `--key`, anyone who can reach the port can push a file -- unless approval asks first (it does by default in a terminal; `--approve auto` turns it off, so only use that with peers you trust). The server does not verify the *client's* certificate. UDP has no TLS and no encryption at all. The receiver never overwrites, but it does listen on a port: keep it closed when you are not transferring.
 
 The 6-digit code is only ~20 bits -- a convenience check for
 the first connect, never a replacement for the full
@@ -108,12 +112,12 @@ fingerprint. Full details: [docs/security.md](docs/security.md).
 | Path | What it does |
 |---|---|
 | `src/warpsend/cli.py` | The CLI — `send` / `receive` / `cert` / `fingerprint`, logo, argument parsing, `--verbose` |
-| `src/warpsend/config.py` | Defaults: port, hosts, timeouts (a TOML config file will replace these in Phase 4) |
+| `src/warpsend/config.py` | Defaults: port, hosts, timeouts (a TOML config file may replace these in a future release) |
 | `src/warpsend/identity.py` | Certificates, fingerprints, known hosts (trust on first use) |
 | `src/warpsend/protocol.py` | Wire format: length-prefixed JSON header, validation, HMAC auth |
 | `src/warpsend/transfer.py` | Sender + receiver engines, both modes; hashing, progress, `.part` files, never-overwrite |
 | `src/warpsend/__main__.py` | `python -m warpsend` |
-| `tests/test_warpsend.py` | pytest suite: fresh transfer, no-overwrite, TCP resume, complete `.part`, auth, TLS + trust-on-first-use, malformed headers, CORRUPT verdict, header validation, UDP transfer + state reset, package layout |
+| `tests/test_warpsend.py` | pytest suite: fresh transfer, no-overwrite, TCP resume, complete `.part`, auth, TLS + trust-on-first-use, malformed headers, CORRUPT verdict, header validation, UDP transfer + state reset, package layout, receiver approval (accept/decline, TCP + UDP), sender cancel, Ctrl-C exit 130 |
 | `.github/workflows/ci.yml` | GitHub Actions: ruff + pytest on Linux, macOS and Windows, Python 3.11/3.12 (see note below) |
 | `LICENSE` | MIT |
 | `pyproject.toml` | Installs the `warpsend` command (`pip install .`); ruff + pytest config |
@@ -122,18 +126,24 @@ fingerprint. Full details: [docs/security.md](docs/security.md).
 
 **Both modes:** sender hashes the file (with a visible "hashing..."
 progress bar), then sends a length-prefixed JSON header
-(`filename`, `filesize`, `checksum`, `protocol: 2`, plus a nonce
+(`filename`, `filesize`, `checksum`, `protocol: 3`, plus a nonce
 and an HMAC tag when `--key` is set). Headers over 8 KB are
 rejected, and every header is validated (required keys, types,
-`filesize >= 0`, sane filename, 64-hex checksum) before anything
-is trusted. The receiver writes to `<name>.part` and verifies
+`filesize >= 0`, sane filename, 64-hex checksum, protocol
+version 3) before anything is trusted. After the checks pass,
+the receiver may ask its operator whether to accept the file
+(`--approve prompt`, or the default when stdin is a terminal):
+a decline answers `REJECTED` (TCP) or `FAIL` (UDP) and
+creates no file. The receiver writes to `<name>.part` and verifies
 SHA-256 after saving — only a match renames it to the final
 name, claimed atomically with a hard link, and an existing file
 is never overwritten (`name (1).ext`, `name (2).ext`, ...).
 A hash mismatch deletes the partial: its prefix cannot be
 trusted, so it is not resumed. Files larger than `--max-size`
 or the free disk space are rejected with `TOO_LARGE` before
-any bytes are sent.
+any bytes are sent. Ctrl-C during a send exits 130 with a
+clean message: the socket closes, the receiver keeps the
+`.part` for resume, and a TCP receiver keeps listening.
 
 **TCP:** 256 KB chunks, sent with `socket.sendfile()` on the
 plain path (read/`sendall` under TLS). Ordering, loss and
@@ -166,11 +176,9 @@ packet is lost. An EOF with chunks missing replies FAIL and
 keeps the `.part`. UDP has no resume: a failed UDP transfer
 restarts from the start.
 
-**Compatibility:** headers carry `protocol: 2`. A v1.3 client
-talking to a pre-v1.2 server falls back to a nonce-less HMAC
-after a short wait for the challenge that never comes; a v1.3
-server accepts older clients (challenge-response auth needs
-v1.2+ on both sides to protect against replay).
+**Compatibility:** headers carry `protocol: 3`, and v1.5
+enforces it: a v1.4 or older peer is rejected as `INVALID`.
+Both ends must be v1.5+ to talk to each other.
 
 ## Tests
 
@@ -179,18 +187,21 @@ python -m pytest tests/ -v
 ruff check src tests && ruff format --check src tests
 ```
 
-10 tests, all passing locally (Nov 17, 2026, ~4 s): fresh
+15 tests, all passing locally (Nov 17, 2026, ~5 s): fresh
 transfer + no-overwrite, TCP resume, complete `.part`
 finalised, auth reject/accept, TLS pinned fingerprint +
 trust-on-first-use + changed-fingerprint abort, malformed
 headers (2 GB header claim, bad JSON, missing keys, wrong
 types) with the server staying alive, CORRUPT verdict giving
 a client failure, header validation, UDP transfer +
-state reset after an abandoned transfer, and the package
+state reset after an abandoned transfer, the package
 layout (including a check that no stale flat module is
-importable). The UDP test skips gracefully where
-loopback datagrams are blocked (this sandbox) and runs on
-CI, where loopback UDP is allowed.
+importable), receiver approval decline and accept (TCP),
+receiver approval decline (UDP), sender cancel keeping the
+`.part` with the server staying alive, and Ctrl-C during a
+send exiting 130 with no traceback (POSIX only). The UDP
+tests skip gracefully where loopback datagrams are blocked
+(this sandbox) and run on CI, where loopback UDP is allowed.
 
 ## Known limitations
 
@@ -199,12 +210,12 @@ CI, where loopback UDP is allowed.
   biggest remaining performance item (Phase 5).
 - No folder sending, no parallel streams, no compression,
   no LAN discovery, no relay/NAT traversal, no client
-  certificate (mutual TLS), no per-file approval prompt.
-- CI is not running yet: the workflow file exists in this
-  checkout but the GitHub app cannot create workflow files
-  through the API, so it must be added via the GitHub web UI
-  or a git push from your machine. Until then the badge above
-  proves nothing.
+  certificate (mutual TLS).
+- CI runs on every push now that the workflow file is on
+  GitHub (added 17 Nov 2026). The first run failed on
+  Windows -- CRLF line endings breaking `ruff format
+  --check` -- fixed with a `.gitattributes` forcing LF;
+  check the Actions tab for the latest result.
 - Not on PyPI yet: the name `warpsend` was checked on
   17 Nov 2026 and does not exist, so it is free to claim.
   Release steps (tag, CI file, PyPI upload) are in

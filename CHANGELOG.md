@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.5.0 -- 17 Nov 2026 (Phase 4, part 1: approval + cancel)
+
+- **Receiver approval.** `receive` now asks before accepting
+  each file: name, size, sender address and the first 16
+  hex of the SHA-256, then `Accept? [y/N]`. Default is
+  prompt-when-interactive: it asks when stdin is a terminal
+  and never asks when stdin is piped (scripts, CI).
+  `--approve prompt` forces the prompt, `--approve auto`
+  never asks. A decline answers `REJECTED` (TCP) or `FAIL`
+  (UDP) and creates no file and no `.part`. The sender exits
+  1 with "receiver declined the transfer".
+- **Cancel.** Ctrl-C during `send` now exits 130 with a
+  clean "Cancelled -- partial kept on the receiver, send
+  again to resume" instead of a traceback. The socket
+  closes, which is the cancel signal: the receiver keeps
+  the `.part` for resume and a TCP receiver keeps
+  listening. There is no in-band cancel packet -- after the
+  header the TCP stream is raw file bytes, so extra bytes
+  would be written as file data. `send_tcp` / `send_udp`
+  also take an optional `cancel` threading.Event, checked
+  per chunk, which raises `TransferCancelled`.
+- **Protocol v3.** Headers must now carry `protocol: 3`;
+  older versions are rejected as `INVALID`. Both ends must
+  be v1.5+ to talk to each other.
+- **Tests.** 15 pytest tests (was 10): approval decline and
+  accept (TCP), approval decline (UDP), cancel keeping the
+  `.part` with the server staying alive, Ctrl-C exiting 130
+  with no traceback (POSIX only), protocol v3 enforcement.
+
+Migration notes (from 1.4.0):
+
+- A v1.5 receiver rejects v1.4 and older senders (and vice
+  versa): the protocol version is now enforced, not just
+  advertised. Upgrade both ends.
+- `receive` in a terminal now prompts per file. Pass
+  `--approve auto` to restore the old never-ask behaviour,
+  e.g. for scripted receivers.
+- `send_tcp` / `send_udp` take a new optional `cancel`
+  keyword argument; existing calls are unaffected.
+- Everything else is unchanged: same command, same flags,
+  same behaviour, all 15 tests pass.
+
 ## 1.4.0 -- 17 Nov 2026 (cleanup)
 
 - **Removed the legacy shims.** The top-level `server.py`,
@@ -72,8 +114,8 @@ Migration notes (from 1.2.0):
 
 Release steps (maintainer, not automated):
 
-1. Tag the release: `git tag v1.3.0 && git push origin
-   v1.3.0` (or create the tag on the GitHub website --
+1. Tag the release: `git tag v1.5.0 && git push origin
+   v1.5.0` (or create the tag on the GitHub website --
    the GitHub app cannot create tags through the API).
 2. Add `.github/workflows/ci.yml` via the GitHub website
    or a git push from your own machine -- the app cannot

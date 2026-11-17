@@ -1,4 +1,4 @@
-"""Protocol -- the wire format both modes speak (protocol v2).
+"""Protocol -- the wire format both modes speak (protocol v3).
 
 A transfer starts with a length-prefixed JSON header:
 
@@ -6,7 +6,7 @@ A transfer starts with a length-prefixed JSON header:
 
 Header contents:
     {"filename": ..., "filesize": ..., "checksum": ...,
-     "protocol": 2, "nonce": ..., "auth": ...}
+     "protocol": 3, "nonce": ..., "auth": ...}
   checksum = SHA-256 of the whole file, computed by the sender.
   nonce/auth are present only with --key (see below).
 
@@ -21,6 +21,21 @@ Auth (shared key): the HMAC-SHA256 covers the header fields
 replayed. TCP: the nonce is the server's random challenge.
 UDP: the client generates a random nonce per transfer and the
 server rejects a nonce it has already seen in this run.
+
+Approval (v1.5): after the checks pass, the receiver may ask
+its operator whether to accept the file. TCP answers the
+header with a line: FRESH 0 / RESUME <offset> / DONE on
+accept, REJECTED on decline (no file is created). UDP
+answers the header with a type-4 ACK on accept, FAIL on
+decline. Either way a decline creates no .part file.
+
+Cancel (v1.5): there is no in-band cancel packet -- after the
+header the TCP stream is raw file bytes, so any extra bytes
+would be written as file data. Cancelling is closing the
+connection: the receiver sees EOF, keeps the .part for
+resume, and keeps listening. UDP is the same by timeout:
+the sender stops, the receiver's 30 s idle timeout abandons
+the transfer and keeps the .part.
 
 UDP packets (see transfer.py) carry a 1-byte type first:
 0 = header (JSON), 1 = data, 2 = EOF, 3 = ACK, 4 = header ACK.
@@ -126,7 +141,7 @@ def validate_header(header) -> dict:
     if nonce is not None and not isinstance(nonce, str):
         raise ValueError("bad nonce in header")
     protocol = header.get("protocol")
-    if protocol is not None and protocol not in (1, 2):
+    if protocol != PROTOCOL_VERSION:
         raise ValueError(f"unsupported protocol version {protocol!r}")
     return {
         "filename": name,
@@ -134,7 +149,7 @@ def validate_header(header) -> dict:
         "checksum": checksum.lower(),
         "auth": auth,
         "nonce": nonce,
-        "protocol": protocol or 1,
+        "protocol": protocol,
     }
 
 

@@ -1,15 +1,15 @@
 """WarpSend defaults -- the knobs a user or a future config file sets.
 
 These are the values the CLI uses when no flag overrides them.
-Phase 4 will read them from a TOML config file
-(~/.warpsend/config.toml); until then they live here, in one
-place, instead of scattered through the code.
+A TOML config file (~/.warpsend/config.toml) may replace them
+in a future release; until then they live here, in one place,
+instead of scattered through the code.
 """
 
 import os
 
-VERSION = "1.4.0"
-PROTOCOL_VERSION = 2
+VERSION = "1.5.0"
+PROTOCOL_VERSION = 3
 
 # Network defaults.
 DEFAULT_PORT = 5000

@@ -1,4 +1,4 @@
-"""WarpSend -- a fast file-transfer CLI over TCP / UDP (v1.4).
+"""WarpSend -- a fast file-transfer CLI over TCP / UDP (v1.5).
 
 One command, two modes:
 
@@ -37,7 +37,7 @@ from .identity import (
     generate_cert,
     short_code,
 )
-from .transfer import send_tcp, send_udp, serve_tcp, serve_udp
+from .transfer import TransferCancelled, prompt_approve, send_tcp, send_udp, serve_tcp, serve_udp
 
 # WarpSend ASCII logo -- printed by the CLI on every run.
 BANNER = r"""
@@ -178,6 +178,14 @@ def build_parser():
         default=0,
         help="reject files larger than this many bytes (0 = no limit besides free disk space)",
     )
+    recv.add_argument(
+        "--approve",
+        choices=["auto", "prompt"],
+        default=None,
+        help="per-file approval: prompt asks before accepting each file "
+        "(default when stdin is a terminal), auto never asks "
+        "(default when stdin is piped, e.g. scripts and CI)",
+    )
     _add_banner_opt(recv)
 
     cert = sub.add_parser("cert", help="generate a self-signed TLS certificate")
@@ -246,24 +254,34 @@ def main(argv=None):
             parser.error(f"file not found: {', '.join(missing)}")
         key = _key_from(args)
         failures = 0
-        for path in args.file:
-            print(f">> sending {path} over {args.mode.upper()} to {args.host}:{args.port}")
-            if args.mode == "tcp":
-                ok = send_tcp(
-                    args.host,
-                    args.port,
-                    path,
-                    key=key,
-                    tls=args.tls,
-                    fingerprint=args.fingerprint,
-                    trust_new=args.trust_new,
-                )
-            else:
-                if args.tls:
-                    print("TLS is TCP-only; UDP sends are not encrypted")
-                ok = send_udp(args.host, args.port, path, key=key)
-            if not ok:
-                failures += 1
+        try:
+            for path in args.file:
+                print(f">> sending {path} over {args.mode.upper()} to {args.host}:{args.port}")
+                if args.mode == "tcp":
+                    ok = send_tcp(
+                        args.host,
+                        args.port,
+                        path,
+                        key=key,
+                        tls=args.tls,
+                        fingerprint=args.fingerprint,
+                        trust_new=args.trust_new,
+                    )
+                else:
+                    if args.tls:
+                        print("TLS is TCP-only; UDP sends are not encrypted")
+                    ok = send_udp(args.host, args.port, path, key=key)
+                if not ok:
+                    failures += 1
+        except (KeyboardInterrupt, TransferCancelled):
+            # Ctrl-C: the socket closes on the way out, which is
+            # the cancel signal -- the receiver keeps the .part
+            # for resume. No traceback, exit code 130 (SIGINT).
+            print(
+                "\nCancelled -- partial kept on the receiver, send again to resume",
+                file=sys.stderr,
+            )
+            return 130
         return 1 if failures else 0
     elif args.command == "receive":
         print(
@@ -271,6 +289,14 @@ def main(argv=None):
             f"{args.host}:{args.port} over {args.mode.upper()} ..."
         )
         key = _key_from(args)
+        if args.approve == "auto":
+            approve = None
+        elif args.approve == "prompt":
+            approve = prompt_approve
+        else:
+            # Default: ask when run in a terminal, never ask when
+            # stdin is piped or redirected (scripts, CI).
+            approve = prompt_approve if sys.stdin.isatty() else None
         if args.mode == "tcp":
             serve_tcp(
                 args.host,
@@ -281,11 +307,19 @@ def main(argv=None):
                 keyfile=args.tls_key,
                 outdir=args.outdir,
                 max_size=args.max_size,
+                approve=approve,
             )
         else:
             if args.tls:
                 print("TLS is TCP-only; UDP receives are not encrypted")
-            serve_udp(args.host, args.port, key=key, outdir=args.outdir, max_size=args.max_size)
+            serve_udp(
+                args.host,
+                args.port,
+                key=key,
+                outdir=args.outdir,
+                max_size=args.max_size,
+                approve=approve,
+            )
     else:
         parser.print_help()
     return 0

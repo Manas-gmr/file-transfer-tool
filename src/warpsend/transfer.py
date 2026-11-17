@@ -27,6 +27,23 @@ mismatch deletes the partial: its prefix cannot be trusted,
 so it is not resumed. A complete .part is verified and
 finalised (DONE) instead of restarted.
 
+Approval (v1.5): serve_tcp / serve_udp take an `approve`
+callable (header, addr) -> bool. When set, the receiver asks
+it before answering the header -- FRESH / RESUME / DONE on
+accept, REJECTED on decline (TCP), header ACK on accept,
+FAIL on decline (UDP). A decline creates no file and no
+.part. The CLI wires it to an interactive prompt when stdin
+is a terminal, `--approve prompt` to force it, `--approve
+auto` to never ask.
+
+Cancel (v1.5): send_tcp / send_udp take an optional `cancel`
+threading.Event, checked per chunk; Ctrl-C raises
+TransferCancelled instead. Either way the socket closes, the
+receiver keeps the .part for resume, and a TCP receiver keeps
+listening. There is no in-band cancel packet: after the header
+the TCP stream is raw file bytes, so extra bytes would be
+written as file data.
+
 User-facing messages go to stdout/stderr with print(); the
 same events are also logged on the "warpsend" logger so
 `--verbose` (or a future config file) can capture them.
@@ -47,6 +64,7 @@ import time
 
 from .config import (
     CONN_TIMEOUT,
+    PROTOCOL_VERSION,
     UDP_IDLE_TIMEOUT,
     UDP_MAX_RETRIES,
     UDP_TIMEOUT,
@@ -152,6 +170,41 @@ def progress(done: int, total: int, label: str = "", base: int = 0) -> None:
     if done >= total:
         print(file=sys.stderr)  # finish the line
         _PROGRESS.pop(label, None)
+
+
+# --- approval and cancel (v1.5) -------------------------------------------
+
+
+class TransferCancelled(Exception):
+    """A transfer stopped by the user (Ctrl-C, or a cancel event).
+
+    The receiver keeps the .part file, so the same file can be
+    sent again to resume. The CLI maps this to exit code 130.
+    """
+
+
+def prompt_approve(header, addr):
+    """Ask the operator whether to accept an incoming file.
+
+    Prints who is sending what, then reads one line from stdin.
+    EOF (piped stdin closed, Ctrl-D) means No. KeyboardInterrupt
+    is deliberately not swallowed: on the UDP server it stops
+    the server, and on TCP it is delivered to the main thread.
+    """
+    name = header["filename"]
+    size = header["filesize"]
+    print(
+        f"incoming file from {addr[0]}:{addr[1]}: {name} "
+        f"({_fmt_bytes(size)}, SHA-256 {header['checksum'][:16]}...)"
+    )
+    try:
+        answer = input("Accept? [y/N] ")
+    except EOFError:
+        print("no answer -- rejected")
+        return False
+    ok = answer.strip().lower() in ("y", "yes")
+    print("accepted" if ok else "rejected")
+    return ok
 
 
 # --- .part files, resume metadata, never-overwrite ------------------------
@@ -325,7 +378,7 @@ def _finish_part(outdir, name, expected_hash, hasher=None, conn=None, udp_sock=N
     return ok
 
 
-def _handle_tcp_conn(conn, key, outdir, max_size, challenge=""):
+def _handle_tcp_conn(conn, key, outdir, max_size, challenge="", approve=None, addr=None):
     """Receive one file on an already-accepted TCP connection."""
     try:
         raw_header = recv_header(conn)
@@ -371,6 +424,19 @@ def _handle_tcp_conn(conn, key, outdir, max_size, challenge=""):
         except OSError:
             pass
         return
+    if approve is not None:
+        try:
+            peer = addr or conn.getpeername()
+        except OSError:
+            peer = ("?", 0)
+        if not approve(header, peer):
+            print(f"rejected {name} from {peer} -- receiver declined")
+            log.info("rejected %s from %s", name, peer)
+            try:
+                conn.sendall(b"REJECTED\n")
+            except OSError:
+                pass
+            return
     print(f"receiving {name} ({size} bytes)")
     log.info("receiving %s (%d bytes)", name, size)
     os.makedirs(outdir, exist_ok=True)
@@ -435,7 +501,7 @@ def _handle_tcp_conn(conn, key, outdir, max_size, challenge=""):
         _finish_part(outdir, name, header["checksum"], hasher=hasher, conn=conn)
 
 
-def _serve_one_tcp(conn, addr, ctx, key, outdir, max_size):
+def _serve_one_tcp(conn, addr, ctx, key, outdir, max_size, approve=None):
     print(f"connected: {addr}")
     log.info("connected: %s", addr)
     if ctx is not None:
@@ -458,14 +524,18 @@ def _serve_one_tcp(conn, addr, ctx, key, outdir, max_size):
         except OSError:
             return
         try:
-            _handle_tcp_conn(conn, key, outdir, max_size, challenge=challenge)
+            _handle_tcp_conn(
+                conn, key, outdir, max_size, challenge=challenge, approve=approve, addr=addr
+            )
         except Exception as e:  # noqa: BLE001 -- a bad peer must not
             # kill the receiver; the connection is dropped, the partial kept.
             print(f"connection error for {addr}: {type(e).__name__}: {e} -- partial kept if any")
             log.warning("connection error for %s: %s: %s", addr, type(e).__name__, e)
 
 
-def serve_tcp(host, port, key=None, tls=False, cert=None, keyfile=None, outdir=None, max_size=0):
+def serve_tcp(
+    host, port, key=None, tls=False, cert=None, keyfile=None, outdir=None, max_size=0, approve=None
+):
     outdir = outdir or OUTDIR
     os.makedirs(outdir, exist_ok=True)
     ctx = None
@@ -490,12 +560,14 @@ def serve_tcp(host, port, key=None, tls=False, cert=None, keyfile=None, outdir=N
                 print("\nserver stopped")
                 return
             t = threading.Thread(
-                target=_serve_one_tcp, args=(conn, addr, ctx, key, outdir, max_size), daemon=True
+                target=_serve_one_tcp,
+                args=(conn, addr, ctx, key, outdir, max_size, approve),
+                daemon=True,
             )
             t.start()
 
 
-def serve_udp(host, port, key=None, outdir=None, max_size=0):
+def serve_udp(host, port, key=None, outdir=None, max_size=0, approve=None):
     outdir = outdir or OUTDIR
     os.makedirs(outdir, exist_ok=True)
     seen_nonces = set()
@@ -552,6 +624,13 @@ def serve_udp(host, port, key=None, outdir=None, max_size=0):
                         size = new_header["filesize"]
                         if (max_size and size > max_size) or size > shutil.disk_usage(outdir).free:
                             print(f"rejecting {new_header['filename']}: too large")
+                            sock.sendto(b"FAIL", addr)
+                            continue
+                        if approve is not None and not approve(new_header, addr):
+                            print(
+                                f"rejected {new_header['filename']} from {addr} "
+                                "-- receiver declined"
+                            )
                             sock.sendto(b"FAIL", addr)
                             continue
                         header, sender = new_header, addr
@@ -671,8 +750,25 @@ def _wrap_tls(sock, host, fingerprint=None, trust_new=False, known_hosts_path=No
 
 
 def send_tcp(
-    host, port, path, key=None, tls=False, fingerprint=None, trust_new=False, known_hosts_path=None
+    host,
+    port,
+    path,
+    key=None,
+    tls=False,
+    fingerprint=None,
+    trust_new=False,
+    known_hosts_path=None,
+    cancel=None,
 ):
+    """Send one file over TCP.
+
+    `cancel` is an optional threading.Event: when set, the send
+    stops at the next chunk boundary and raises
+    TransferCancelled. The socket closes on the way out, which
+    is the cancel signal -- the receiver keeps the .part for
+    resume and keeps listening. Ctrl-C raises KeyboardInterrupt
+    in the caller; the CLI converts it to the same outcome.
+    """
     size = os.path.getsize(path)
     print(f"hashing {os.path.basename(path)} ...")
     checksum = sha256_of_file(path, on_progress=lambda d, t: progress(d, t, label="hashing"))
@@ -706,6 +802,10 @@ def send_tcp(
             )
             reply = recv_line(sock, timeout=2.0)
             offset = 0
+            if reply == "REJECTED":
+                print("receiver declined the transfer")
+                log.warning("receiver declined %s", path)
+                return False
             if reply in ("AUTH_FAIL", "TOO_LARGE", "INVALID"):
                 print(f"server rejected the transfer: {reply}")
                 log.warning("server rejected %s: %s", path, reply)
@@ -719,6 +819,8 @@ def send_tcp(
                 except ValueError:
                     offset = 0
                 print(f"resuming from byte {offset} of {size}")
+            if cancel is not None and cancel.is_set():
+                raise TransferCancelled("cancelled by user")
             sent = offset
             with open(path, "rb") as f:
                 if not tls:
@@ -727,6 +829,8 @@ def send_tcp(
                     remaining = size - offset
                     pos = offset
                     while remaining > 0:
+                        if cancel is not None and cancel.is_set():
+                            raise TransferCancelled("cancelled by user")
                         n = sock.sendfile(f, pos, min(CHUNK_TCP, remaining))
                         if n == 0:
                             break
@@ -737,6 +841,8 @@ def send_tcp(
                 else:
                     f.seek(offset)
                     while chunk := f.read(CHUNK_TCP):
+                        if cancel is not None and cancel.is_set():
+                            raise TransferCancelled("cancelled by user")
                         sock.sendall(chunk)
                         sent += len(chunk)
                         progress(sent, size, label="sending", base=offset)
@@ -752,7 +858,12 @@ def send_tcp(
             return True
 
 
-def send_udp(host, port, path, key=None):
+def send_udp(host, port, path, key=None, cancel=None):
+    """Send one file over UDP. `cancel` works as in send_tcp:
+    a set event stops the send at the next chunk boundary and
+    raises TransferCancelled; the receiver's idle timeout then
+    abandons the transfer and keeps the .part.
+    """
     size = os.path.getsize(path)
     print(f"hashing {os.path.basename(path)} ...")
     checksum = sha256_of_file(path, on_progress=lambda d, t: progress(d, t, label="hashing"))
@@ -770,7 +881,7 @@ def send_udp(host, port, path, key=None):
             "filename": os.path.basename(path),
             "filesize": size,
             "checksum": checksum,
-            "protocol": 2,
+            "protocol": PROTOCOL_VERSION,
             "nonce": nonce,
         }
         if auth:
@@ -778,6 +889,8 @@ def send_udp(host, port, path, key=None):
         header_packet = b"\x00" + json.dumps(header).encode()
         # Reliable header: retry until the server ACKs it (type 4).
         for attempt in range(MAX_RETRIES):
+            if cancel is not None and cancel.is_set():
+                raise TransferCancelled("cancelled by user")
             sock.sendto(header_packet, (host, port))
             try:
                 reply, _ = sock.recvfrom(64)
@@ -795,6 +908,8 @@ def send_udp(host, port, path, key=None):
         # Stream from disk: the whole file is never held in RAM.
         with open(path, "rb") as f:
             for seq in range(total):
+                if cancel is not None and cancel.is_set():
+                    raise TransferCancelled("cancelled by user")
                 chunk = f.read(CHUNK_UDP)
                 packet = b"\x01" + struct.pack("!III", seq, total, crc32_of(chunk)) + chunk
                 for attempt in range(MAX_RETRIES):
@@ -817,6 +932,8 @@ def send_udp(host, port, path, key=None):
                     return False
         # Reliable EOF: retry until the final verdict arrives.
         for attempt in range(MAX_RETRIES):
+            if cancel is not None and cancel.is_set():
+                raise TransferCancelled("cancelled by user")
             sock.sendto(b"\x02", (host, port))  # EOF
             try:
                 reply = sock.recvfrom(64)[0].decode()

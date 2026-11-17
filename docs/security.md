@@ -25,14 +25,19 @@
   sender knew the key; the final SHA-256 is the only check on
   the bytes themselves.
 - **Without `--key`, anyone who can reach the port can push a
-  file.** There is no receiver-side approval yet (planned,
-  Phase 4) and no per-file allow/deny policy.
+  file -- unless approval asks first.** Approval is on by
+  default when the receiver runs in a terminal
+  (`--approve prompt` forces it, `--approve auto` turns it
+  off); a decline creates no file. With `--approve auto`,
+  only receive from peers you trust.
 - **The server does not verify the client's certificate.**
   TLS authenticates the server to the client, not the other
   way round. Mutual TLS is not implemented.
 - **UDP has no TLS and no encryption at all.**
-- **A trusted session can still push files without per-file
-  approval.** Only receive from peers you trust.
+- **A cancel is a dropped connection.** There is no
+  in-band cancel packet, so a cancelled transfer looks
+  like a network drop to the receiver -- which is why the
+  `.part` is kept either way.
 - **The receiver listens on a port.** Keep it closed when
   you are not transferring. There is no rate limiting or
   IP allow-listing.

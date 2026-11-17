@@ -1,4 +1,4 @@
-"""WarpSend v1.4 tests -- run from the project directory:
+"""WarpSend v1.5 tests -- run from the project directory:
 
     python3 tests/test_warpsend.py
     python -m pytest tests/ -v
@@ -8,16 +8,22 @@ checks: fresh transfer, no-overwrite, TCP resume, a complete
 .part being finalised, shared-key auth, TLS with a pinned
 fingerprint, TLS trust-on-first-use, malformed headers keeping
 the server alive, and the client exit code following the
-server's CORRUPT verdict. UDP tests run when loopback
-datagrams are allowed (they are on CI runners) and skip
-gracefully when they are blocked, as in this sandbox.
+server's CORRUPT verdict. v1.5 adds: receiver approval
+(accept and decline, TCP and UDP), sender cancel keeping the
+.part with the server staying alive, Ctrl-C exiting 130 with
+no traceback (POSIX only), and protocol v3 enforcement.
+UDP tests run when loopback datagrams are allowed (they are
+on CI runners) and skip gracefully when they are blocked, as
+in this sandbox.
 """
 
 import json
 import os
 import shutil
+import signal
 import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -25,9 +31,11 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
+from warpsend.config import PROTOCOL_VERSION
 from warpsend.identity import generate_cert
 from warpsend.protocol import validate_header
 from warpsend.transfer import (
+    TransferCancelled,
     part_path,
     progress,
     resume_offset,
@@ -249,7 +257,9 @@ def test_corrupt_verdict_is_failure():
 
 
 def test_validate_header():
-    good = validate_header({"filename": "a.txt", "filesize": 10, "checksum": "ab" * 32})
+    good = validate_header(
+        {"filename": "a.txt", "filesize": 10, "checksum": "ab" * 32, "protocol": 3}
+    )
     assert good["filename"] == "a.txt" and good["filesize"] == 10
     for bad in (
         {},
@@ -260,6 +270,8 @@ def test_validate_header():
         {"filename": "a.txt", "filesize": "10", "checksum": "ab" * 32},
         {"filename": "a.txt", "filesize": 1, "checksum": "xyz"},
         {"filename": "a.txt", "filesize": 1, "checksum": "ab" * 32, "protocol": 99},
+        {"filename": "a.txt", "filesize": 1, "checksum": "ab" * 32, "protocol": 2},
+        {"filename": "a.txt", "filesize": 1, "checksum": "ab" * 32},
     ):
         try:
             validate_header(bad)
@@ -300,7 +312,7 @@ def test_udp_transfer_and_state_reset():
                 "filename": "ws-abandoned.txt",
                 "filesize": 5000,
                 "checksum": "ab" * 32,
-                "protocol": 2,
+                "protocol": PROTOCOL_VERSION,
                 "nonce": "n1",
             }
         ).encode()
@@ -328,8 +340,8 @@ def test_udp_transfer_and_state_reset():
 def test_package_layout():
     import warpsend
 
-    assert warpsend.__version__ == "1.4.0"
-    assert warpsend.PROTOCOL_VERSION == 2
+    assert warpsend.__version__ == "1.5.0"
+    assert warpsend.PROTOCOL_VERSION == 3
     # The old flat modules are gone: importing one must fail,
     # so a stale `python3 server.py` cannot silently run old code.
     for stale in ("client", "server", "utils"):
@@ -340,6 +352,124 @@ def test_package_layout():
         else:
             raise AssertionError(f"stale top-level module {stale!r} still importable")
     print("ok: src/warpsend layout, no stale flat modules")
+
+
+def test_receiver_rejects_when_approval_declines():
+    outdir = temp_outdir()
+    port = free_port()
+    seen = []
+
+    def decline(header, addr):
+        seen.append(header["filename"])
+        return False
+
+    start_tcp(port, outdir, approve=decline)
+    src = make_file("ws-declined.txt", 5_000)
+    assert not send_tcp("127.0.0.1", port, src), "server accepted a declined file"
+    assert seen == ["ws-declined.txt"], "approval hook never saw the header"
+    assert not os.path.exists(os.path.join(outdir, "ws-declined.txt"))
+    assert not os.path.exists(part_path(outdir, "ws-declined.txt"))
+    print("ok: receiver approval decline (no file, no .part)")
+
+
+def test_receiver_accepts_when_approval_accepts():
+    outdir = temp_outdir()
+    port = free_port()
+    start_tcp(port, outdir, approve=lambda h, a: True)
+    src = make_file("ws-accepted.txt", 5_000)
+    assert send_tcp("127.0.0.1", port, src), "server rejected an accepted file"
+    assert wait_for_file(os.path.join(outdir, "ws-accepted.txt"))
+    assert sha256_of_file(os.path.join(outdir, "ws-accepted.txt")) == sha256_of_file(src)
+    print("ok: receiver approval accept")
+
+
+def test_sender_cancel_keeps_part_and_server_alive():
+    outdir = temp_outdir()
+    port = free_port()
+    start_tcp(port, outdir)
+    src = make_file("ws-cancel.bin", 5_000_000, byte=b"X")
+    cancel = threading.Event()
+    cancel.set()  # cancel before the first chunk: deterministic
+    try:
+        send_tcp("127.0.0.1", port, src, cancel=cancel)
+    except TransferCancelled:
+        pass
+    else:
+        raise AssertionError("cancelled send did not raise TransferCancelled")
+    assert os.path.exists(part_path(outdir, "ws-cancel.bin")), ".part missing after cancel"
+    # The server must still be alive for the next transfer.
+    src2 = make_file("ws-after-cancel.txt", 5_000)
+    assert send_tcp("127.0.0.1", port, src2), "server died after a cancelled transfer"
+    assert wait_for_file(os.path.join(outdir, "ws-after-cancel.txt"))
+    print("ok: sender cancel keeps .part, server stays alive")
+
+
+def test_ctrl_c_send_exits_130():
+    # Ctrl-C mid-send must exit 130 with a clean message, no traceback.
+    # POSIX only: SIGINT delivery to a subprocess is not reliable on Windows.
+    if os.name == "nt":
+        print("skip: Ctrl-C exit-code test is POSIX-only (runs on Linux/macOS CI)")
+        return
+    outdir = temp_outdir()
+    port = free_port()
+    start_tcp(port, outdir)
+    # 500 MB: hashing alone takes longer than the wait below, so the
+    # SIGINT is guaranteed to land mid-transfer, not after it.
+    # Sparse file (truncate): no disk used, but hashing still reads
+    # 500 MB of zeros -- /tmp here is a small tmpfs.
+    src = os.path.join(tempfile.gettempdir(), "ws-big.bin")
+    with open(src, "wb") as f:
+        f.truncate(500 * 1024 * 1024)
+    env = dict(os.environ, PYTHONPATH=os.path.join(HERE, "src"))
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "warpsend",
+            "send",
+            src,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--no-banner",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        env=env,
+    )
+    time.sleep(0.5)
+    proc.send_signal(signal.SIGINT)
+    _, stderr = proc.communicate(timeout=30)
+    assert proc.returncode == 130, f"Ctrl-C exit code was {proc.returncode}"
+    assert b"Traceback" not in stderr, "Ctrl-C printed a traceback"
+    assert b"Cancelled" in stderr, "Ctrl-C printed no cancel message"
+    try:
+        os.remove(src)
+    except OSError:
+        pass
+    print("ok: Ctrl-C during send exits 130, no traceback")
+
+
+def test_udp_receiver_rejects_when_approval_declines():
+    if not _udp_allowed():
+        print("skip: UDP datagrams blocked in this sandbox (runs on CI)")
+        return
+    outdir = temp_outdir()
+    port = free_port()
+    threading.Thread(
+        target=serve_udp,
+        args=("127.0.0.1", port),
+        kwargs={"outdir": outdir, "approve": lambda h, a: False},
+        daemon=True,
+    ).start()
+    time.sleep(0.3)
+    src = make_file("ws-udp-reject.txt", 5_000, byte=b"J")
+    assert not send_udp("127.0.0.1", port, src), "UDP server accepted a declined file"
+    assert not os.path.exists(os.path.join(outdir, "ws-udp-reject.txt"))
+    assert not os.path.exists(part_path(outdir, "ws-udp-reject.txt"))
+    print("ok: UDP receiver approval decline (no file, no .part)")
 
 
 if __name__ == "__main__":
@@ -353,4 +483,9 @@ if __name__ == "__main__":
     test_corrupt_verdict_is_failure()
     test_validate_header()
     test_udp_transfer_and_state_reset()
-    print("all WarpSend v1.4 tests passed")
+    test_receiver_rejects_when_approval_declines()
+    test_receiver_accepts_when_approval_accepts()
+    test_sender_cancel_keeps_part_and_server_alive()
+    test_ctrl_c_send_exits_130()
+    test_udp_receiver_rejects_when_approval_declines()
+    print("all WarpSend v1.5 tests passed")
