@@ -5,7 +5,7 @@ claim here is tied to a test or to a stated gap -- see the
 comparison doc's warning about README claims that no test
 backs up.
 
-## Verified (tests in `tests/test_warpsend.py`, 28 passing)
+## Verified (tests in `tests/test_warpsend.py`, 37 passing)
 
 - TCP fresh transfer, never-overwrite, resume from `.part`,
   complete `.part` finalised.
@@ -30,6 +30,14 @@ backs up.
   receiver, CLI discover, and the `@peer` LAN fallback --
   **the live announce+browse only on networks that allow
   multicast** (see below).
+- Bidirectional sessions: frame roundtrips (control +
+  data), a two-way transfer on one connection, decline
+  with no file, resume of a half `.part`, wrong-key auth
+  rejection, and a CLI two-way test with two real
+  subprocesses.
+- TUI: peer merge/label/target helpers, and a Textual
+  pilot test that queues a file in the running app and
+  sends it to a live receiver.
 - UDP transfer and state reset after an abandoned transfer
   -- **on CI only** (see below).
 
@@ -53,11 +61,23 @@ backs up.
   window is the biggest remaining performance item and needs
   a loss/latency simulator to measure properly.
 - **No folder sending**, no parallel streams, no compression.
-- **No LAN discovery, no relay, no NAT traversal.** Both
-  machines must be directly reachable; CGNAT pairs fail
-  without IPv6. No firewall automation.
-- **No bidirectional session.** Each file is a fresh
-  connection from sender to receiver. (Phase 4, still open.)
+- **No relay, no NAT traversal.** Both machines must be
+  directly reachable; CGNAT pairs fail without IPv6. No
+  firewall automation. (mDNS discovery exists, but it is
+  same-subnet only.)
+- **The TUI is an optional extra.** It needs Textual
+  (`pip install warpsend[tui]`); the core stays
+  stdlib-only. TUI sends are TCP only, and the built-in
+  receiver is a `warpsend receive` subprocess, not a
+  second TUI pane.
+- **Sessions are TCP-only, one peer at a time.** A session
+  carries one peer; a second peer waits for the listener
+  to accept it after the first session ends. There are no
+  keepalive frames (the socket uses TCP keepalive), and
+  EOF on stdin ends the session -- so a scripted session
+  should hold stdin open until its transfers finish. A
+  second offer for a filename already being received is
+  declined.
 - **mDNS is same-subnet only.** Multicast does not cross
   routers, so discovery finds machines on the same Wi-Fi
   or LAN segment and nothing beyond it. No goodbye packets

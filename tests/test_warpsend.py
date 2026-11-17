@@ -1,4 +1,4 @@
-"""WarpSend v1.7 tests -- run from the project directory:
+"""WarpSend v1.9 tests -- run from the project directory:
 
     python3 tests/test_warpsend.py
     python -m pytest tests/ -v
@@ -18,11 +18,18 @@ malformed config rejected). v1.7 adds: mDNS discovery --
 packet encode/decode roundtrips, compression pointers, the
 query answerer, a live announce+browse (skips where multicast
 is blocked, as in this sandbox), and proof that a failed
-announce never kills the receiver. UDP tests run when loopback
-datagrams are allowed (they are on CI runners) and skip
-gracefully when they are blocked, as in this sandbox.
+announce never kills the receiver. v1.8 adds: bidirectional
+sessions -- frame roundtrips, two-way transfer on one
+connection, decline with no file, resume of a half .part,
+wrong-key auth rejection, and a CLI two-way test with two
+real subprocesses. v1.9 adds: the Textual TUI -- peer
+merge/label/target helpers, and a pilot test that queues a
+file in the app and sends it to a live receiver. UDP tests run when loopback datagrams
+are allowed (they are on CI runners) and skip gracefully
+when they are blocked, as in this sandbox.
 """
 
+import asyncio
 import contextlib
 import io
 import json
@@ -64,6 +71,7 @@ from warpsend.peers import (
     save_config,
 )
 from warpsend.protocol import validate_header
+from warpsend.session import join_session, recv_frame, send_data_frame, send_frame, serve_session
 from warpsend.transfer import (
     TransferCancelled,
     part_path,
@@ -76,6 +84,7 @@ from warpsend.transfer import (
     serve_udp,
     sha256_of_file,
 )
+from warpsend.tui import WarpSendApp, merge_peers, peer_label, target_for_peer
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -370,7 +379,7 @@ def test_udp_transfer_and_state_reset():
 def test_package_layout():
     import warpsend
 
-    assert warpsend.__version__ == "1.7.0"
+    assert warpsend.__version__ == "1.9.0"
     assert warpsend.PROTOCOL_VERSION == 3
     # The old flat modules are gone: importing one must fail,
     # so a stale `python3 server.py` cannot silently run old code.
@@ -809,6 +818,290 @@ def test_cli_send_unknown_peer_falls_back_to_lan():
     print("ok: CLI send to an unknown peer falls back to a LAN lookup, then fails cleanly")
 
 
+def test_session_frame_roundtrip():
+    a, b = socket.socketpair()
+    try:
+        send_frame(a, {"type": "ping", "n": 42})
+        assert recv_frame(b) == ("control", {"type": "ping", "n": 42}, None)
+        send_frame(b, {"type": "pong"})
+        assert recv_frame(a) == ("control", {"type": "pong"}, None)
+        send_data_frame(a, 7, b"hello-bytes")
+        assert recv_frame(b) == ("data", 7, b"hello-bytes")
+        try:
+            send_frame(a, {"type": "x", "pad": "y" * 9000})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("oversized frame accepted")
+    finally:
+        a.close()
+        b.close()
+    print("ok: session frame roundtrip (control + data, oversized rejected)")
+
+
+def _serve_session_thread(port, outdir, **kwargs):
+    kwargs.setdefault("once", True)
+    t = threading.Thread(
+        target=serve_session,
+        args=("127.0.0.1", port),
+        kwargs={"outdir": outdir, **kwargs},
+        daemon=True,
+    )
+    t.start()
+    time.sleep(0.3)
+    return t
+
+
+def test_session_two_way_transfer():
+    host_dir = temp_outdir()
+    join_dir = temp_outdir()
+    port = free_port()
+    file_a = make_file("ws-sess-a.txt", 8_000)
+    file_b = make_file("ws-sess-b.txt", 5_000)
+
+    def _on_session(sess):
+        assert sess.send_file(file_a), "host could not send file A"
+        sess.wait_closed()
+
+    t = _serve_session_thread(port, host_dir, on_session=_on_session)
+    sess = join_session("127.0.0.1", port, outdir=join_dir)
+    assert sess is not None, "join failed"
+    assert sess.send_file(file_b), "joiner could not send file B"
+    assert wait_for_file(os.path.join(join_dir, "ws-sess-a.txt"))
+    assert wait_for_file(os.path.join(host_dir, "ws-sess-b.txt"))
+    assert sha256_of_file(os.path.join(join_dir, "ws-sess-a.txt")) == sha256_of_file(file_a)
+    assert sha256_of_file(os.path.join(host_dir, "ws-sess-b.txt")) == sha256_of_file(file_b)
+    sess.close()
+    t.join(timeout=10)
+    assert not t.is_alive(), "host session thread did not exit"
+    print("ok: session two-way transfer (both directions, one connection)")
+
+
+def test_session_decline():
+    host_dir = temp_outdir()
+    port = free_port()
+
+    def _on_session(sess):
+        sess.wait_closed()
+
+    t = _serve_session_thread(port, host_dir, approve=lambda h, a: False, on_session=_on_session)
+    sess = join_session("127.0.0.1", port, outdir=temp_outdir())
+    assert sess is not None, "join failed"
+    src = make_file("ws-sess-decline.txt", 2_000)
+    assert not sess.send_file(src), "declined file reported as sent"
+    assert not os.path.exists(os.path.join(host_dir, "ws-sess-decline.txt"))
+    assert not os.path.exists(part_path(host_dir, "ws-sess-decline.txt"))
+    sess.close()
+    t.join(timeout=10)
+    print("ok: session decline (no file, no .part)")
+
+
+def test_session_resume():
+    host_dir = temp_outdir()
+    port = free_port()
+    src = make_file("ws-sess-resume.txt", 10_000)
+    checksum = sha256_of_file(src)
+    with open(part_path(host_dir, "ws-sess-resume.txt"), "wb") as f:
+        f.write(open(src, "rb").read(5_000))
+    save_meta(host_dir, "ws-sess-resume.txt", 10_000, checksum)
+
+    def _on_session(sess):
+        sess.wait_closed()
+
+    t = _serve_session_thread(port, host_dir, on_session=_on_session)
+    sess = join_session("127.0.0.1", port, outdir=temp_outdir())
+    assert sess is not None, "join failed"
+    assert sess.send_file(src), "resumed send failed"
+    assert wait_for_file(os.path.join(host_dir, "ws-sess-resume.txt"))
+    assert sha256_of_file(os.path.join(host_dir, "ws-sess-resume.txt")) == checksum
+    sess.close()
+    t.join(timeout=10)
+    print("ok: session resume (half .part completed over the session)")
+
+
+def test_session_auth_reject():
+    port = free_port()
+    _serve_session_thread(port, temp_outdir(), key="right")
+    sess = join_session("127.0.0.1", port, key="wrong", outdir=temp_outdir())
+    assert sess is None, "wrong key was accepted"
+    print("ok: session auth rejects a wrong key")
+
+
+def test_cli_session_two_way():
+    host_dir = temp_outdir()
+    join_dir = temp_outdir()
+    port = free_port()
+    file_a = make_file("ws-cli-sess-a.txt", 6_000)
+    file_b = make_file("ws-cli-sess-b.txt", 4_000)
+    src_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+    env = dict(os.environ, PYTHONPATH=src_dir)
+    host = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "warpsend",
+            "--no-banner",
+            "session",
+            "--port",
+            str(port),
+            "--outdir",
+            host_dir,
+            "--send",
+            file_a,
+            "--once",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+    )
+    time.sleep(1)  # let the listener bind before the joiner connects
+    joiner = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "warpsend",
+            "--no-banner",
+            "session",
+            "--join",
+            f"127.0.0.1:{port}",
+            "--outdir",
+            join_dir,
+            "--send",
+            file_b,
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+    )
+    try:
+        assert wait_for_file(os.path.join(join_dir, "ws-cli-sess-a.txt"), timeout=15), (
+            "file A never arrived;\n"
+            f"host out: {host.stdout.read() if host.poll() is not None else '(still running)'}\n"
+            f"joiner out: {joiner.stdout.read() if joiner.poll() is not None else '(still running)'}"
+        )
+        assert wait_for_file(os.path.join(host_dir, "ws-cli-sess-b.txt"), timeout=15)
+        assert sha256_of_file(os.path.join(join_dir, "ws-cli-sess-a.txt")) == sha256_of_file(file_a)
+        assert sha256_of_file(os.path.join(host_dir, "ws-cli-sess-b.txt")) == sha256_of_file(file_b)
+    finally:
+        # EOF on stdin ends both sessions.
+        host.stdin.close()
+        joiner.stdin.close()
+    assert host.wait(timeout=10) == 0, f"host exited {host.returncode}: {host.stdout.read()}"
+    assert joiner.wait(timeout=10) == 0, (
+        f"joiner exited {joiner.returncode}: {joiner.stdout.read()}"
+    )
+    print("ok: CLI session two-way (subprocesses, --send both ways, EOF ends it)")
+
+
+def test_tui_merge_peers():
+    saved = [
+        {
+            "name": "laptop",
+            "host": "10.0.0.2",
+            "port": 5000,
+            "mode": "tcp",
+            "tls": False,
+            "fingerprint": None,
+            "key_file": None,
+        }
+    ]
+    discovered = [
+        {"name": "LAPTOP", "host": "10.0.0.3", "port": 5000, "mode": "tcp", "tls": False},
+        {"name": "desk", "host": "10.0.0.4", "port": 5001, "mode": "tcp", "tls": False},
+    ]
+    merged = merge_peers(saved, discovered)
+    assert [p["name"] for p in merged] == ["laptop", "desk"]
+    assert merged[0]["source"] == "saved"
+    assert merged[1]["source"] == "lan"
+    assert "(LAN)" in peer_label(merged[1])
+    print("ok: TUI peer merge (saved first, LAN deduped by name)")
+
+
+def test_tui_target_for_peer():
+    cfg_path = temp_config_path()
+    cfg = load_config(cfg_path)
+    add_peer(cfg, "laptop", "10.0.0.2", port=5001)
+    save_config(cfg, cfg_path)
+    config = load_config(cfg_path)
+    saved = {
+        "name": "laptop",
+        "host": "10.0.0.2",
+        "port": 5001,
+        "mode": "tcp",
+        "tls": False,
+        "fingerprint": None,
+        "key_file": None,
+        "source": "saved",
+    }
+    target = target_for_peer(saved, config)
+    assert target["host"] == "10.0.0.2" and target["port"] == 5001
+    lan = {
+        "name": "desk",
+        "host": "10.0.0.9",
+        "port": 5002,
+        "mode": "tcp",
+        "tls": True,
+        "fingerprint": "ab" * 32,
+        "key_file": None,
+        "source": "lan",
+    }
+    target2 = target_for_peer(lan, config)
+    assert target2["host"] == "10.0.0.9" and target2["tls"] is True
+    assert target2["fingerprint"] == "ab" * 32
+    print("ok: TUI peer target resolution (saved + LAN)")
+
+
+def test_tui_app_send_end_to_end():
+    src_dir = temp_outdir()
+    recv_dir = temp_outdir()
+    port = free_port()
+    src = os.path.join(src_dir, "ws-tui-send.txt")
+    with open(src, "wb") as f:
+        f.write(b"A" * 4_000)
+    cfg_path = temp_config_path()
+    cfg = load_config(cfg_path)
+    add_peer(cfg, "recv", "127.0.0.1", port=port)
+    save_config(cfg, cfg_path)
+    old = os.environ.get("WARPSEND_CONFIG")
+    os.environ["WARPSEND_CONFIG"] = cfg_path
+    start_tcp(port, recv_dir)
+
+    async def _run():
+        app = WarpSendApp(start_dir=src_dir)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert len(app.peers) >= 1, "saved peer did not appear in the TUI"
+            assert app.peers[0]["name"] == "recv"
+            app._queue_file(src)
+            assert len(app.queue) == 1
+            app.action_send()
+            # Poll with awaits (never block the loop: the send
+            # worker only starts when the loop iterates).
+            dest = os.path.join(recv_dir, "ws-tui-send.txt")
+            for _ in range(100):
+                if os.path.isfile(dest):
+                    break
+                await asyncio.sleep(0.1)
+            assert os.path.isfile(dest), "file never arrived at the receiver"
+            assert sha256_of_file(dest) == sha256_of_file(src)
+            await pilot.pause()
+            assert app.queue == [], "sent file stayed in the queue"
+            await pilot.press("q")
+
+    try:
+        asyncio.run(_run())
+    finally:
+        if old is None:
+            os.environ.pop("WARPSEND_CONFIG", None)
+        else:
+            os.environ["WARPSEND_CONFIG"] = old
+    print("ok: TUI send end to end (pilot: queue a file, send to a live receiver)")
+
+
 if __name__ == "__main__":
     test_package_layout()
     test_fresh_and_no_overwrite()
@@ -838,4 +1131,13 @@ if __name__ == "__main__":
     test_announce_failure_does_not_kill_receiver()
     test_cli_discover()
     test_cli_send_unknown_peer_falls_back_to_lan()
-    print("all WarpSend v1.7 tests passed")
+    test_session_frame_roundtrip()
+    test_session_two_way_transfer()
+    test_session_decline()
+    test_session_resume()
+    test_session_auth_reject()
+    test_cli_session_two_way()
+    test_tui_merge_peers()
+    test_tui_target_for_peer()
+    test_tui_app_send_end_to_end()
+    print("all WarpSend v1.9 tests passed")

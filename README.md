@@ -1,4 +1,4 @@
-# WarpSend v1.7.0
+# WarpSend v1.9.0
 
 [![CI](https://github.com/Manas-gmr/file-transfer-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/Manas-gmr/file-transfer-tool/actions/workflows/ci.yml)
 
@@ -18,11 +18,10 @@ TCP or UDP with a live progress bar (speed + ETA), and prove it
 arrived intact with a checksum. Stdlib only — no dependencies
 to install.
 
-v1.7 adds mDNS discovery (Phase 4, part 3), stdlib only:
-`warpsend receive --announce` makes the receiver findable
-on the LAN by name, `warpsend discover` lists receivers,
-and `warpsend send file @laptop` falls back to a LAN lookup
-when the peer is not saved. No IPs at all. All 28 tests pass.
+v1.9 adds a Textual TUI (Phase 6, part 1): `warpsend tui`
+opens a file manager -- browse files, pick a peer, watch
+progress. Optional extra: `pip install warpsend[tui]`.
+All 37 tests pass.
 
 ## Install
 
@@ -60,13 +59,25 @@ warpsend peer remove laptop
 # Terminal 2: warpsend discover
 #             laptop: 192.168.1.10:5000 tcp
 warpsend send notes.pdf @laptop   # not saved? looked up on the LAN
+
+# Persistent session — either side can send until one quits
+# Terminal 1: warpsend session --port 5000
+# Terminal 2: warpsend session --join 192.168.1.10:5000
+# Then on either side: send <file>   (or: quit)
+warpsend session --join @laptop --send notes.pdf
+
+# Textual file manager (needs: pip install warpsend[tui])
+warpsend tui
+# Browse files (Enter opens a directory, Space queues a
+# file), pick a peer (saved + LAN-discovered), S sends the
+# queue, R starts/stops the receiver, D re-discovers, Q quits.
 ```
 
 UDP mode — same commands with `--mode udp`. Received files land in `./received/` (or `--outdir`).
 
 ```bash
 warpsend --help            # all commands and options
-warpsend --version         # WarpSend v1.7.0
+warpsend --version         # WarpSend v1.9.0
 warpsend --banner          # print just the logo
 warpsend --verbose send notes.pdf   # also log events to stderr
 warpsend send --help       # options for send
@@ -78,6 +89,8 @@ warpsend receive --help    # options for receive
 | `warpsend send <file...> [--mode tcp\|udp] [--host H] [--port P] [--peer NAME]` | Send file(s) to a receiver; exit code 1 on failure, 130 on Ctrl-C cancel |
 | `warpsend receive [--mode tcp\|udp] [--host H] [--port P] [--outdir D] [--max-size N] [--approve auto\|prompt] [--announce [NAME]]` | Wait for files and save them (until Ctrl-C); asks before accepting each file by default in a terminal; `--announce` advertises the receiver on the LAN via mDNS (default name: hostname) |
 | `warpsend discover [--timeout S]` | List WarpSend receivers announcing on the local network (mDNS) |
+| `warpsend session [--port P] [--host H] [--join HOST[:PORT]\|@PEER] [--peer NAME] [--send FILE...] [--once] [--announce [NAME]]` | Open a persistent session: either side can send files until one side quits; `--send` files go out when it opens, then `send <file>` / `quit` from the terminal (or piped stdin, EOF ends it) |
+| `warpsend tui [--dir DIR] [--port P] [--outdir DIR]` | Open the Textual file manager: browse files, pick a peer, watch progress (needs `pip install warpsend[tui]`) |
 | `warpsend peer add <name> <host> [--port P] [--mode tcp\|udp] [--tls] [--fingerprint HEX] [--key-file PATH]` | Save a peer in `~/.warpsend/config.toml` |
 | `warpsend peer list` | List saved peers |
 | `warpsend peer remove <name>` | Remove a saved peer |
@@ -158,12 +171,14 @@ fingerprint. Full details: [docs/security.md](docs/security.md).
 | `src/warpsend/cli.py` | The CLI — `send` / `receive` / `cert` / `fingerprint`, logo, argument parsing, `--verbose` |
 | `src/warpsend/config.py` | Defaults: port, hosts, timeouts (a TOML config file may replace these in a future release) |
 | `src/warpsend/identity.py` | Certificates, fingerprints, known hosts (trust on first use) |
+| `src/warpsend/session.py` | Bidirectional persistent sessions: framing, handshake, Session, serve/join |
+| `src/warpsend/tui.py` | Textual file manager (optional `warpsend[tui]` extra): file tree, peers, send queue, progress, log |
 | `src/warpsend/mdns.py` | mDNS discovery: DNS packet encode/decode, announce (`_warpsend._tcp.local`) and browse |
 | `src/warpsend/peers.py` | Saved peers and config file: TOML load/save, validation, flag > peer > defaults > built-in resolution |
 | `src/warpsend/protocol.py` | Wire format: length-prefixed JSON header, validation, HMAC auth |
 | `src/warpsend/transfer.py` | Sender + receiver engines, both modes; hashing, progress, `.part` files, never-overwrite |
 | `src/warpsend/__main__.py` | `python -m warpsend` |
-| `tests/test_warpsend.py` | pytest suite: fresh transfer, no-overwrite, TCP resume, complete `.part`, auth, TLS + trust-on-first-use, malformed headers, CORRUPT verdict, header validation, UDP transfer + state reset, package layout, receiver approval (accept/decline, TCP + UDP), sender cancel, Ctrl-C exit 130, peer add/list/remove roundtrip, peer validation, resolve precedence, defaults, malformed config, CLI `@peer` end to end, mDNS packet roundtrips, compression pointers, query answering, live announce+browse, announce failure not killing the receiver, CLI discover, `@peer` LAN fallback |
+| `tests/test_warpsend.py` | pytest suite: fresh transfer, no-overwrite, TCP resume, complete `.part`, auth, TLS + trust-on-first-use, malformed headers, CORRUPT verdict, header validation, UDP transfer + state reset, package layout, receiver approval (accept/decline, TCP + UDP), sender cancel, Ctrl-C exit 130, peer add/list/remove roundtrip, peer validation, resolve precedence, defaults, malformed config, CLI `@peer` end to end, mDNS packet roundtrips, compression pointers, query answering, live announce+browse, announce failure not killing the receiver, CLI discover, `@peer` LAN fallback, session frame roundtrips, session two-way transfer, session decline, session resume, session auth rejection, CLI session two-way, TUI peer merge/label/target, TUI pilot send end to end |
 | `.github/workflows/ci.yml` | GitHub Actions: ruff + pytest on Linux, macOS and Windows, Python 3.11/3.12 (see note below) |
 | `LICENSE` | MIT |
 | `pyproject.toml` | Installs the `warpsend` command (`pip install .`); ruff + pytest config |
@@ -233,7 +248,7 @@ python -m pytest tests/ -v
 ruff check src tests && ruff format --check src tests
 ```
 
-28 tests, all passing locally (Nov 17, 2026, ~6 s): fresh
+37 tests, all passing locally (Nov 17, 2026, ~10 s): fresh
 transfer + no-overwrite, TCP resume, complete `.part`
 finalised, auth reject/accept, TLS pinned fingerprint +
 trust-on-first-use + changed-fingerprint abort, malformed
@@ -258,7 +273,13 @@ query answerer (QU unicast vs multicast replies, other
 services ignored), a live announce+browse (skips where
 multicast is blocked), a failed announce not killing the
 receiver, CLI discover, and the `@peer` LAN fallback failing
-cleanly. The UDP and mDNS live tests skip gracefully where
+cleanly, session frame roundtrips (control + data), a
+two-way transfer on one connection, a session decline with
+no file, a session resume of a half `.part`, a wrong-key
+auth rejection, and a CLI session two-way with two real
+subprocesses, TUI peer merge/label/target helpers, and a
+Textual pilot test that queues a file in the running app
+and sends it to a live receiver. The UDP and mDNS live tests skip gracefully where
 loopback datagrams or multicast are blocked (this sandbox)
 and run on CI, where loopback UDP is allowed.
 

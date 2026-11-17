@@ -35,6 +35,7 @@ Install it as a real command with:
 import argparse
 import logging
 import os
+import select
 import socket
 import sys
 
@@ -55,6 +56,7 @@ from .peers import (
     resolve_target,
     save_config,
 )
+from .session import STDIN_LOCK, join_session, locked_approve, serve_session
 from .transfer import TransferCancelled, prompt_approve, send_tcp, send_udp, serve_tcp, serve_udp
 
 # WarpSend ASCII logo -- printed by the CLI on every run.
@@ -297,7 +299,120 @@ def build_parser():
     fp = sub.add_parser("fingerprint", help="show the SHA-256 fingerprint of a certificate")
     fp.add_argument("--cert", default=None, help="certificate file (default: ~/.warpsend/cert.pem)")
     _add_banner_opt(fp)
+
+    sess = sub.add_parser("session", help="open a persistent session: either side can send files")
+    sess.add_argument(
+        "--join",
+        default=None,
+        help="join a listening session: host, host:port, or @peer",
+    )
+    sess.add_argument("--peer", default=None, help="saved peer to join")
+    sess.add_argument(
+        "--host", default=None, help="listen host (default: [defaults], then 0.0.0.0)"
+    )
+    sess.add_argument(
+        "--port", type=int, default=None, help="port (default: peer, [defaults], then 5000)"
+    )
+    sess.add_argument(
+        "--send", nargs="*", default=[], help="file(s) to send when the session opens"
+    )
+    sess.add_argument("--once", action="store_true", help="host mode: serve one session, then exit")
+    sess.add_argument(
+        "--outdir", default=None, help="where received files go (default: ./received)"
+    )
+    sess.add_argument(
+        "--max-size",
+        type=int,
+        default=0,
+        help="reject files larger than this many bytes (0 = no limit besides free disk space)",
+    )
+    sess.add_argument(
+        "--approve",
+        choices=["auto", "prompt"],
+        default=None,
+        help="per-file approval: prompt asks before accepting each file "
+        "(default when stdin is a terminal), auto never asks "
+        "(default when stdin is piped, e.g. scripts and CI)",
+    )
+    sess.add_argument(
+        "--announce",
+        nargs="?",
+        const="",
+        default=None,
+        help="announce this session listener on the LAN via mDNS "
+        "(default name: this machine's hostname)",
+    )
+    sess.add_argument("--cert", default=None, help="TLS certificate file (host mode)")
+    sess.add_argument(
+        "--tls-key",
+        default=None,
+        dest="tls_key",
+        help="TLS private key file (host mode, default: ~/.warpsend/key.pem)",
+    )
+    _add_common(sess)
+    _add_tls_args(sess)
+    _add_banner_opt(sess)
+
+    tui = sub.add_parser("tui", help="open the Textual file-manager interface")
+    tui.add_argument("--dir", default=".", help="directory the file browser starts in")
+    tui.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="port the built-in receiver listens on (default: 5000)",
+    )
+    tui.add_argument(
+        "--outdir", default=None, help="where the receiver saves files (default: ./received)"
+    )
+    _add_banner_opt(tui)
     return parser
+
+
+def _run_session_commands(session, send_files):
+    """Send the --send files, then read commands from stdin until
+    the session ends, stdin hits EOF, or the user quits.
+
+    Commands: `send <file>`, `help`, `quit`. stdin is read
+    under the session stdin lock, so an approval prompt (which
+    also reads stdin) can never steal half a typed command.
+    EOF on stdin ends the session -- so a scripted session
+    should hold stdin open until its transfers finish.
+    """
+    for path in send_files:
+        if session.closed:
+            break
+        session.send_file(path)
+    if sys.stdin.isatty():
+        print("session commands: send <file> | quit")
+    while not session.closed:
+        try:
+            r, _, _ = select.select([sys.stdin], [], [], 0.5)
+        except (OSError, ValueError):
+            break
+        if not r:
+            continue
+        with STDIN_LOCK:
+            try:
+                line = sys.stdin.readline()
+            except (OSError, ValueError):
+                break
+        if not line:
+            break  # EOF: end the session
+        line = line.strip()
+        if not line:
+            continue
+        if line in ("quit", "bye", "exit"):
+            break
+        if line == "help":
+            print("commands: send <file> | quit")
+            continue
+        if line.startswith("send "):
+            target = line[5:].strip()
+            if target:
+                session.send_file(target)
+            continue
+        print(f"unknown command: {line!r} (try: send <file> | quit)")
+    session.close()
 
 
 def main(argv=None):
@@ -408,6 +523,159 @@ def main(argv=None):
                 f"{' + TLS' if p['tls'] else ''}"
                 f"  (send with: warpsend send <file> @{p['name']})"
             )
+        return 0
+
+    if args.command == "tui":
+        from . import tui as _tui
+
+        if _tui.App is None:
+            print("the TUI needs Textual: pip install warpsend[tui]")
+            return 1
+        _tui.WarpSendApp(start_dir=args.dir, port=args.port, outdir=args.outdir).run()
+        return 0
+
+    if args.command == "session":
+        config, err = _load_config()
+        if err is not None:
+            print(f"could not load config: {err}")
+            return 1
+        if args.approve == "auto":
+            approve = None
+        elif args.approve == "prompt":
+            approve = locked_approve(prompt_approve)
+        else:
+            # Default: ask when run in a terminal, never ask when
+            # stdin is piped or redirected (scripts, CI).
+            approve = locked_approve(prompt_approve) if sys.stdin.isatty() else None
+        if args.join is not None or args.peer is not None:
+            if args.join is not None and args.peer is not None:
+                print("error: use --join or --peer, not both")
+                return 1
+            peer_name = args.peer
+            join_arg = args.join
+            if join_arg is not None and join_arg.startswith("@"):
+                peer_name = join_arg[1:]
+                join_arg = None
+            try:
+                if peer_name:
+                    try:
+                        target = resolve_target(
+                            config,
+                            peer=peer_name,
+                            host=args.host,
+                            port=args.port,
+                            tls=args.tls,
+                            fingerprint=args.fingerprint,
+                            key_file=args.key_file,
+                            outdir=args.outdir,
+                        )
+                    except KeyError as e:
+                        # Not saved -- maybe it is announcing on the LAN.
+                        print(f"peer {peer_name!r} is not saved -- looking for it on the LAN ...")
+                        try:
+                            found = discover_peer(peer_name, timeout=2.5)
+                        except OSError as mdns_err:
+                            print(f"error: {e} (mDNS unavailable: {mdns_err})")
+                            return 1
+                        if found is None:
+                            print(
+                                f"error: {e} (and no receiver named {peer_name!r} "
+                                f"answered on the LAN)"
+                            )
+                            return 1
+                        print(f"found {peer_name!r} on the LAN at {found['host']}:{found['port']}")
+                        target = resolve_target(
+                            config,
+                            host=args.host or found["host"],
+                            port=args.port if args.port is not None else found["port"],
+                            tls=args.tls if args.tls is not None else found["tls"],
+                            fingerprint=args.fingerprint or found["fingerprint"],
+                            key_file=args.key_file,
+                            outdir=args.outdir,
+                        )
+                else:
+                    host_part, sep, port_part = join_arg.rpartition(":")
+                    if not sep:
+                        host_part, port_part = join_arg, None
+                    try:
+                        join_port = (
+                            int(port_part)
+                            if port_part is not None
+                            else (args.port if args.port is not None else 5000)
+                        )
+                    except ValueError:
+                        print(f"error: bad port in --join {join_arg!r}")
+                        return 1
+                    target = resolve_target(
+                        config,
+                        host=args.host or host_part,
+                        port=join_port,
+                        tls=args.tls,
+                        fingerprint=args.fingerprint,
+                        key_file=args.key_file,
+                        outdir=args.outdir,
+                    )
+                key = _key_from(args, target["key_file"])
+            except (ValueError, OSError) as e:
+                print(f"error: {e}")
+                return 1
+            session = join_session(
+                target["host"],
+                target["port"],
+                key=key,
+                tls=target["tls"],
+                fingerprint=target["fingerprint"],
+                trust_new=args.trust_new,
+                outdir=target["outdir"],
+                max_size=args.max_size,
+                approve=approve,
+            )
+            if session is None:
+                return 1
+            try:
+                _run_session_commands(session, args.send)
+            except KeyboardInterrupt:
+                print("\nending session")
+                session.close()
+            return 0
+        # Host mode: listen for a peer.
+        try:
+            target = resolve_target(
+                config,
+                host=args.host,
+                port=args.port,
+                tls=args.tls,
+                outdir=args.outdir,
+            )
+            key = _key_from(args, target["key_file"])
+        except (ValueError, OSError) as e:
+            print(f"error: {e}")
+            return 1
+        announce = None
+        if args.announce is not None:
+            announce = sanitize_instance(args.announce or socket.gethostname())
+
+        def _on_session(session):
+            try:
+                _run_session_commands(session, args.send)
+            except KeyboardInterrupt:
+                print("\nending session")
+                session.close()
+
+        serve_session(
+            target["host"],
+            target["port"],
+            key=key,
+            tls=target["tls"],
+            cert=args.cert,
+            keyfile=args.tls_key,
+            outdir=target["outdir"],
+            max_size=args.max_size,
+            approve=approve,
+            announce=announce,
+            once=args.once,
+            on_session=_on_session,
+        )
         return 0
 
     if args.command == "send":

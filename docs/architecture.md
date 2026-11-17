@@ -3,7 +3,7 @@
 WarpSend is a small, stdlib-only file-transfer CLI. One command,
 two modes: `warpsend send` and `warpsend receive`, over TCP or UDP.
 
-## Layout (v1.7)
+## Layout (v1.9)
 
 ```
 src/warpsend/
@@ -16,6 +16,8 @@ src/warpsend/
   protocol.py    -- wire format: headers, validation, HMAC auth
   peers.py       -- saved peers and config file (TOML), resolution
   mdns.py        -- mDNS discovery: DNS packets, announce, browse
+  session.py     -- bidirectional sessions: framing, Session, serve/join
+  tui.py         -- Textual file manager (optional extra)
   transfer.py    -- send_tcp / send_udp / serve_tcp / serve_udp,
                     hashing, progress, .part files, never-overwrite
 tests/           -- pytest, real servers on localhost in threads
@@ -115,6 +117,49 @@ receiver: `start_announcer` returns None on setup failure
 and the announcer thread stops itself on a later send
 failure, printing a warning either way.
 
+## Bidirectional session
+
+`session.py` is the persistent-connection counterpart to the
+one-shot transfer. One side listens (`serve_session`), the
+other joins (`join_session`); after a hello/welcome handshake
+with an HMAC challenge, both sides hold a `Session`: a reader
+thread dispatching frames, a write lock that makes each
+frame atomic, and a pending-reply registry keyed by message
+id so a send can wait for its own accept/receipt while the
+reader keeps working.
+
+The framing is the point: every frame is length + a marker
+byte + payload, control frames carrying JSON and data frames
+carrying a transfer id + up to 256 KB of file bytes. File
+data is never raw on the stream, so control frames interleave
+with it and both directions transfer concurrently -- an
+earlier draft sent file bytes raw and serialised transfers
+with a lock, which deadlocked the two-way case (each side's
+sender held its lock while waiting for a reply its own
+reader could not deliver). Offers reuse `validate_header()`
+and the `.part` + resume + never-overwrite machinery from
+`transfer.py`; a second offer for a filename already being
+received is declined. The CLI drives a session with
+`--send` files up front, then a `send <file>` / `quit`
+command loop reading stdin under a lock shared with the
+approval prompt, so the prompt can never steal half a typed
+command. EOF on stdin ends the session.
+
+## TUI
+
+`tui.py` is the optional Textual interface (`pip install
+warpsend[tui]`). The app is a thin shell over the existing
+machinery: a `DirectoryTree` for files, the config file plus
+`browse()` for peers, and `send_tcp` for sending. Two
+design points matter. First, sending runs in a worker
+thread through `send_tcp`'s `on_progress` / `on_message`
+hooks, so the progress bar shows exact percentages and
+nothing prints to the terminal behind the app. Second,
+receiving runs as a `warpsend receive` subprocess whose
+output is piped into the log widget -- its prints never
+reach the screen, so the display stays clean. Sends are
+TCP only; the peer's mode is ignored.
+
 ## Cancel
 
 Cancelling is closing the connection. There is deliberately
@@ -166,6 +211,14 @@ to stderr so stdout stays machine-readable.
 * `protocol.py` -- everything about *what bytes mean on the
   wire* (headers, validation, auth tags). Nothing here opens
   a socket or a file.
+* `tui.py` -- everything about *the interface* (file tree,
+  peer list, send queue, progress, log). It owns no
+  protocol: it calls `send_tcp`, `browse()` and the
+  config helpers, and shells out to `warpsend receive`.
+* `session.py` -- everything about *a live session* (framing,
+  handshake, sending and receiving inside a session). It
+  reuses the .part machinery from `transfer.py` and never
+  touches the one-shot protocol.
 * `mdns.py` -- everything about *finding receivers*
   (DNS packets, announce, browse). It never moves a file.
 * `peers.py` -- everything about *where to send and what the

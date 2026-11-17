@@ -1,5 +1,71 @@
 # Changelog
 
+## 1.9.0 -- 17 Nov 2026 (Phase 6, part 1: TUI file manager)
+
+- **Textual TUI.** `warpsend tui` opens a file manager:
+  a file tree on the left (Enter opens a directory, Space
+  queues the highlighted file), saved + LAN-discovered
+  peers on the right, a send queue under the tree, and a
+  progress bar + transfer log at the bottom. Keys: `q`
+  quit, `d` discover peers, `s` send the queue to the
+  selected peer, `r` start/stop the built-in receiver,
+  `u` up a directory, `Space` queue a file.
+- **Optional dependency.** Textual is an extra, not a
+  core requirement: `pip install warpsend[tui]`. The core
+  stays stdlib-only; without Textual, `warpsend tui`
+  prints the install hint and exits 1.
+- **How it works.** Sending runs in-process in a worker
+  thread through new `on_progress` / `on_message` hooks
+  on `send_tcp`, so the progress bar shows exact
+  percentages and nothing prints to the terminal behind
+  the app. Receiving runs as a `warpsend receive`
+  subprocess whose output is piped into the log, so its
+  prints never reach the screen. Sends are TCP only.
+- **Tests.** 37 pytest tests (was 34): peer merge/label/
+  target helpers, and a Textual pilot test that queues a
+  file in the running app and sends it to a live receiver.
+
+Migration notes (from 1.8.0):
+
+- No breaking changes. Same commands, same behaviour.
+  The TUI is opt-in (`warpsend tui`); nothing about the
+  CLI changed except the two new optional hooks on
+  `send_tcp`, which are inert unless passed. All 37 tests
+  pass.
+
+## 1.8.0 -- 17 Nov 2026 (Phase 4, part 4: bidirectional session)
+
+- **Bidirectional persistent session.** `warpsend session`
+  listens; `warpsend session --join host:port`,
+  `--peer name` or `--join @name` connects. The connection
+  stays open until either side ends it, and either side can
+  send files at any time -- even both at once. `--send`
+  files go out when the session opens; afterwards the
+  `send <file>` / `quit` commands work from the terminal,
+  or scripted from piped stdin (EOF ends the session).
+  `--once` serves a single session, then exits; `--announce`
+  advertises the listener on the LAN via mDNS.
+- **Session protocol v1** (TCP only; the one-shot protocol
+  stays v3): a hello/welcome handshake with an HMAC
+  challenge (shared key), then length-prefixed frames --
+  control frames (file offers, accept/decline/have, eof,
+  received, bye) and framed data chunks, so control
+  frames interleave with file bytes and both directions
+  can transfer concurrently. Offers use the same
+  validate_header() and the same .part + resume +
+  never-overwrite machinery as one-shot transfers.
+- **Tests.** 34 pytest tests (was 28): frame roundtrips
+  (control + data), two-way transfer on one connection,
+  decline with no file, resume of a half .part, wrong-key
+  auth rejection, and a CLI two-way test with two real
+  subprocesses.
+
+Migration notes (from 1.7.0):
+
+- No breaking changes. Same commands, same behaviour.
+  Sessions are opt-in (`warpsend session`); nothing
+  listens unless you start it. All 34 tests pass.
+
 ## 1.7.0 -- 17 Nov 2026 (Phase 4, part 3: mDNS discovery)
 
 - **mDNS discovery (stdlib only, no zeroconf dependency).**
@@ -184,8 +250,8 @@ Migration notes (from 1.2.0):
 
 Release steps (maintainer, not automated):
 
-1. Tag the release: `git tag v1.7.0 && git push origin
-   v1.7.0` (or create the tag on the GitHub website --
+1. Tag the release: `git tag v1.9.0 && git push origin
+   v1.9.0` (or create the tag on the GitHub website --
    the GitHub app cannot create tags through the API).
 2. Add `.github/workflows/ci.yml` via the GitHub website
    or a git push from your own machine -- the app cannot

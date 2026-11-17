@@ -48,6 +48,15 @@
   network you trust, and use `--key` (or `--tls`) if the
   files matter -- an announcer that anyone can see is
   still an approver that anyone must get past.
+- **Sessions authenticate once, then trust the connection.**
+  The hello/welcome handshake checks the shared key with
+  an HMAC over a fresh challenge, exactly like the
+  one-shot challenge-response. After that, every file in
+  the session rides the same connection with no further
+  auth -- so a session is only as safe as the connection
+  it started on. Use `--tls` (and `--key`) if the files
+  matter, and end the session when you are done; a
+  session left open is a port left open.
 
 ## The 6-digit code is weak -- say so plainly
 

@@ -777,6 +777,8 @@ def send_tcp(
     trust_new=False,
     known_hosts_path=None,
     cancel=None,
+    on_progress=None,
+    on_message=None,
 ):
     """Send one file over TCP.
 
@@ -786,11 +788,31 @@ def send_tcp(
     is the cancel signal -- the receiver keeps the .part for
     resume and keeps listening. Ctrl-C raises KeyboardInterrupt
     in the caller; the CLI converts it to the same outcome.
+
+    `on_progress(done, total)` and `on_message(text)` are for
+    callers that own the display (the TUI): when given, this
+    function reports through them instead of printing to the
+    terminal, so it can run inside a full-screen app. When
+    they are None, behaviour is exactly as before.
     """
+    name = os.path.basename(path)
+
+    def _say(msg):
+        if on_message is not None:
+            on_message(msg)
+        else:
+            print(msg)
+
+    def _prog(done, total, label="", base=0):
+        if on_progress is not None:
+            on_progress(done, total)
+        else:
+            progress(done, total, label=label, base=base)
+
     size = os.path.getsize(path)
-    print(f"hashing {os.path.basename(path)} ...")
-    checksum = sha256_of_file(path, on_progress=lambda d, t: progress(d, t, label="hashing"))
-    print(f"{os.path.basename(path)}: {size} bytes, SHA-256 {checksum}")
+    _say(f"hashing {name} ...")
+    checksum = sha256_of_file(path, on_progress=lambda d, t: _prog(d, t, label="hashing"))
+    _say(f"{name}: {size} bytes, SHA-256 {checksum}")
     log.info(
         "sending %s (%d bytes) to %s:%d over TCP%s",
         path,
@@ -821,22 +843,22 @@ def send_tcp(
             reply = recv_line(sock, timeout=2.0)
             offset = 0
             if reply == "REJECTED":
-                print("receiver declined the transfer")
+                _say("receiver declined the transfer")
                 log.warning("receiver declined %s", path)
                 return False
             if reply in ("AUTH_FAIL", "TOO_LARGE", "INVALID"):
-                print(f"server rejected the transfer: {reply}")
+                _say(f"server rejected the transfer: {reply}")
                 log.warning("server rejected %s: %s", path, reply)
                 return False
             if reply == "DONE":
-                print("server already has the complete file -- nothing to send")
+                _say("server already has the complete file -- nothing to send")
                 return True
             if reply and reply.startswith("RESUME "):
                 try:
                     offset = int(reply.split()[1])
                 except ValueError:
                     offset = 0
-                print(f"resuming from byte {offset} of {size}")
+                _say(f"resuming from byte {offset} of {size}")
             if cancel is not None and cancel.is_set():
                 raise TransferCancelled("cancelled by user")
             sent = offset
@@ -855,7 +877,7 @@ def send_tcp(
                         pos += n
                         sent += n
                         remaining -= n
-                        progress(sent, size, label="sending", base=offset)
+                        _prog(sent, size, label="sending", base=offset)
                 else:
                     f.seek(offset)
                     while chunk := f.read(CHUNK_TCP):
@@ -863,9 +885,9 @@ def send_tcp(
                             raise TransferCancelled("cancelled by user")
                         sock.sendall(chunk)
                         sent += len(chunk)
-                        progress(sent, size, label="sending", base=offset)
+                        _prog(sent, size, label="sending", base=offset)
             verdict = sock.recv(16).decode(errors="replace").strip()
-            print("server says:", verdict)
+            _say(f"server says: {verdict}")
             # A pre-v1.2 server's first reply here is the FRESH
             # line the new client already consumed; anything
             # else is the verdict.

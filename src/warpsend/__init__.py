@@ -7,6 +7,8 @@ Public API (stable for the 1.x line):
     warpsend.transfer   -- send_tcp / send_udp / serve_tcp / serve_udp
     warpsend.peers      -- saved peers and config file (~/.warpsend/config.toml)
     warpsend.mdns       -- mDNS discovery (announce + browse, _warpsend._tcp)
+    warpsend.session    -- bidirectional persistent sessions
+    warpsend.tui        -- Textual file manager (optional extra)
     warpsend.config     -- defaults (port, hosts, timeouts)
     warpsend.cli        -- the `warpsend` command (argparse + main)
 
