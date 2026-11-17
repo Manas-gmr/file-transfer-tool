@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "warpsend"
-version = "1.1.0"
+version = "1.2.0"
 description = "WarpSend — send files at warp speed over TCP/UDP, with progress, SHA-256 verification, resume, auth and optional TLS"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -15,3 +15,6 @@ warpsend = "warpsend:main"
 
 [tool.setuptools]
 py-modules = ["warpsend", "server", "client", "utils"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

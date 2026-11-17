@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WarpSend -- a fast file-transfer CLI over TCP / UDP (v1.1).
+"""WarpSend -- a fast file-transfer CLI over TCP / UDP (v1.2).
 
 One command, two modes:
 
@@ -10,7 +10,7 @@ One command, two modes:
     warpsend receive --mode udp
 
 Design:
-  * TCP -- reliable by default. 64 KB chunks, the OS handles
+  * TCP -- reliable by default. 256 KB chunks, the OS handles
     ordering, loss and duplicates.
   * UDP -- fast, with reliability built in the app: 1024-byte
     chunks, sequence numbers, per-chunk CRC32, ACKs and
@@ -19,20 +19,15 @@ Design:
     the receiver recomputes it after saving. A match means the
     file arrived intact.
 
-v1.1 (improvements taken from the Riptide comparison):
-  * `.part` + rename: files land as `<name>.part` and are renamed
-    only after the SHA-256 matches; existing files are never
-    overwritten (`name (1).ext`).
-  * TCP resume: re-send after a dropped connection and only the
-    missing bytes go over the wire.
-  * Persistent receiver: `receive` keeps listening for the next
-    file until Ctrl-C, and accepts several files in one `send`.
-  * Shared-key auth (`--key` or WARPSEND_KEY): HMAC-SHA256 over
-    the header; a keyed receiver rejects anyone without it.
-  * Optional TLS (`--tls`): stdlib ssl, self-signed cert from
-    `warpsend cert`, fingerprint pinning with `--fingerprint`.
-  * Progress now shows speed and ETA; UDP streams from disk
-    instead of loading the whole file into memory.
+v1.2 (from the 17 Nov 2026 code review):
+  * Robustness: header validation, size limits, per-connection
+    timeouts, thread-per-connection TCP, crash-proof receiver,
+    exit codes that follow the server's verdict.
+  * Safety: challenge-response HMAC (no replay), TLS 1.2 floor,
+    trust-on-first-use known hosts, --key-file, --outdir,
+    --max-size, protocol version in the header.
+  * Speed: incremental hashing, sendfile() on plain TCP,
+    UDP chunks written straight to disk instead of RAM.
 
 Stdlib only -- no pip install needed to run it directly:
     python3 warpsend.py send notes.pdf
@@ -49,26 +44,39 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from client import send_tcp, send_udp      # noqa: E402
 from server import serve_tcp, serve_udp    # noqa: E402
-from utils import (VERSION, default_cert_path, default_key_path,
-                   fingerprint_of_cert_file, generate_cert, print_banner,
-                   short_code)  # noqa: E402
+from utils import (VERSION, default_cert_path, fingerprint_of_cert_file,
+                   generate_cert, print_banner, short_code)  # noqa: E402
+
+
+def _read_key_file(path):
+    with open(path) as f:
+        return f.read().strip()
 
 
 def _key_from(args):
-    return getattr(args, "key", None) or os.environ.get("WARPSEND_KEY")
+    """Shared secret, safest source first.
 
-
-def _add_banner_opt(p):
-    # default=SUPPRESS so a top-level --no-banner is not clobbered
-    # by the subparser's default when the flag is given before `send`.
-    p.add_argument("--no-banner", action="store_true",
-                   default=argparse.SUPPRESS, help="hide the logo")
+    --key-file, then WARPSEND_KEY, then --key (which warns:
+    it shows up in process listings and shell history).
+    """
+    if getattr(args, "key_file", None):
+        return _read_key_file(args.key_file)
+    env_key = os.environ.get("WARPSEND_KEY")
+    if env_key:
+        return env_key
+    if getattr(args, "key", None):
+        print("warning: --key appears in process listings and shell "
+              "history; prefer --key-file or WARPSEND_KEY", file=sys.stderr)
+        return args.key
+    return None
 
 
 def _add_common(p):
     p.add_argument("--key", default=None,
                    help="shared secret (or set WARPSEND_KEY); "
                         "both sides must use the same one")
+    p.add_argument("--key-file", default=None,
+                   help="file containing the shared secret")
 
 
 def _add_mode_args(p):
@@ -84,6 +92,16 @@ def _add_tls_args(p):
     p.add_argument("--fingerprint", default=None,
                    help="expected server TLS fingerprint (send side); "
                         "abort if it does not match")
+    p.add_argument("--trust-new", action="store_true",
+                   help="trust a new TLS host once and remember it "
+                        "in the known-hosts file")
+
+
+def _add_banner_opt(p):
+    # default=SUPPRESS so a top-level --no-banner is not clobbered
+    # by the subparser's default when the flag is given before `send`.
+    p.add_argument("--no-banner", action="store_true",
+                   default=argparse.SUPPRESS, help="hide the logo")
 
 
 def build_parser():
@@ -119,6 +137,11 @@ def build_parser():
                       help="TLS certificate file (default: ~/.warpsend/cert.pem)")
     recv.add_argument("--tls-key", default=None, dest="tls_key",
                       help="TLS private key file (default: ~/.warpsend/key.pem)")
+    recv.add_argument("--outdir", default=None,
+                      help="where received files go (default: ./received)")
+    recv.add_argument("--max-size", type=int, default=0,
+                      help="reject files larger than this many bytes "
+                           "(0 = no limit besides free disk space)")
     _add_banner_opt(recv)
 
     cert = sub.add_parser("cert", help="generate a self-signed TLS certificate")
@@ -184,7 +207,8 @@ def main(argv=None):
                   f"to {args.host}:{args.port}")
             if args.mode == "tcp":
                 ok = send_tcp(args.host, args.port, path, key=key,
-                              tls=args.tls, fingerprint=args.fingerprint)
+                              tls=args.tls, fingerprint=args.fingerprint,
+                              trust_new=args.trust_new)
             else:
                 if args.tls:
                     print("TLS is TCP-only; UDP sends are not encrypted")
@@ -198,11 +222,13 @@ def main(argv=None):
         key = _key_from(args)
         if args.mode == "tcp":
             serve_tcp(args.host, args.port, key=key, tls=args.tls,
-                      cert=args.cert, keyfile=args.tls_key)
+                      cert=args.cert, keyfile=args.tls_key,
+                      outdir=args.outdir, max_size=args.max_size)
         else:
             if args.tls:
                 print("TLS is TCP-only; UDP receives are not encrypted")
-            serve_udp(args.host, args.port, key=key)
+            serve_udp(args.host, args.port, key=key,
+                      outdir=args.outdir, max_size=args.max_size)
     else:
         parser.print_help()
     return 0
