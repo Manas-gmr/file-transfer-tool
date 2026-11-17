@@ -1,4 +1,4 @@
-# WarpSend v1.3.0
+# WarpSend v1.4.0
 
 [![CI](https://github.com/Manas-gmr/file-transfer-tool/actions/workflows/ci.yml/badge.svg)](https://github.com/Manas-gmr/file-transfer-tool/actions/workflows/ci.yml)
 
@@ -18,11 +18,9 @@ TCP or UDP with a live progress bar (speed + ETA), and prove it
 arrived intact with a checksum. Stdlib only — no dependencies
 to install.
 
-v1.3 is the Phase 3 release: the code moved into a proper
-`src/warpsend/` package (identity / protocol / transfer /
-config / cli), with `docs/`, ruff linting, `--verbose`
-logging and a changelog. Behaviour is unchanged from v1.2 --
-all 10 tests pass.
+v1.4 is a cleanup release: the legacy top-level shims are gone,
+so the repository is just the package, the tests and the docs.
+Behaviour is unchanged from v1.3 -- all 10 tests pass.
 
 ## Install
 
@@ -54,7 +52,7 @@ UDP mode — same commands with `--mode udp`. Received files land in `./received
 
 ```bash
 warpsend --help            # all commands and options
-warpsend --version         # WarpSend v1.3.0
+warpsend --version         # WarpSend v1.4.0
 warpsend --banner          # print just the logo
 warpsend --verbose send notes.pdf   # also log events to stderr
 warpsend send --help       # options for send
@@ -115,8 +113,7 @@ fingerprint. Full details: [docs/security.md](docs/security.md).
 | `src/warpsend/protocol.py` | Wire format: length-prefixed JSON header, validation, HMAC auth |
 | `src/warpsend/transfer.py` | Sender + receiver engines, both modes; hashing, progress, `.part` files, never-overwrite |
 | `src/warpsend/__main__.py` | `python -m warpsend` |
-| `server.py`, `client.py`, `utils.py` | Thin legacy shims over the package (old imports still work) |
-| `tests/test_warpsend.py` | pytest suite: fresh transfer, no-overwrite, TCP resume, complete `.part`, auth, TLS + trust-on-first-use, malformed headers, CORRUPT verdict, header validation, UDP transfer + state reset, package layout + shims |
+| `tests/test_warpsend.py` | pytest suite: fresh transfer, no-overwrite, TCP resume, complete `.part`, auth, TLS + trust-on-first-use, malformed headers, CORRUPT verdict, header validation, UDP transfer + state reset, package layout |
 | `.github/workflows/ci.yml` | GitHub Actions: ruff + pytest on Linux, macOS and Windows, Python 3.11/3.12 (see note below) |
 | `LICENSE` | MIT |
 | `pyproject.toml` | Installs the `warpsend` command (`pip install .`); ruff + pytest config |
@@ -190,7 +187,8 @@ headers (2 GB header claim, bad JSON, missing keys, wrong
 types) with the server staying alive, CORRUPT verdict giving
 a client failure, header validation, UDP transfer +
 state reset after an abandoned transfer, and the package
-layout + legacy shims. The UDP test skips gracefully where
+layout (including a check that no stale flat module is
+importable). The UDP test skips gracefully where
 loopback datagrams are blocked (this sandbox) and runs on
 CI, where loopback UDP is allowed.
 

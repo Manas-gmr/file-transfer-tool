@@ -20,11 +20,13 @@ docs/            -- architecture (this file), security, limitations,
                     advantages
 ```
 
-The top level keeps thin legacy shims (`server.py`, `client.py`,
-`utils.py`) so old imports keep working; new code imports from
-the package. `warpsend.py` at the top level was removed in v1.3:
+The top level keeps nothing but the package, the tests and
+the docs. `warpsend.py` at the top level was removed in v1.3:
 a file of that name shadowed the package whenever the checkout
-directory was on `sys.path`. From a checkout, run
+directory was on `sys.path`. The legacy shims (`server.py`,
+`client.py`, `utils.py`) were removed in v1.4 for the same
+reason -- a stale `python3 server.py` must fail loudly
+instead of silently running old code. From a checkout, run
 `PYTHONPATH=src python -m warpsend ...` or `pip install -e .`.
 
 ## The transfer, step by step

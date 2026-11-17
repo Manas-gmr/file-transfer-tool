@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.4.0 -- 17 Nov 2026 (cleanup)
+
+- **Removed the legacy shims.** The top-level `server.py`,
+  `client.py` and `utils.py` (thin re-exports kept for one
+  release) are deleted, locally and from the repository.
+  The repo root is now just the package, the tests and the
+  docs. A test asserts the old modules are *not*
+  importable, so a stale `python3 server.py` fails loudly
+  instead of silently running old code.
+- **Removed local clutter.** `__pycache__` directories,
+  `.ruff_cache`, `.pytest_cache`, `*.egg-info` and the empty
+  `received/` directory are gone (all git-ignored).
+- **Repo hygiene.** Added `CONTRIBUTING.md` and GitHub
+  issue templates (bug report, feature request).
+
+Migration notes (from 1.3.0):
+
+- `from server import serve_tcp`, `from client import
+  send_tcp` and `from utils import ...` no longer work.
+  Import from the package instead:
+  `from warpsend.transfer import serve_tcp, send_tcp`,
+  `from warpsend.protocol import validate_header`,
+  `from warpsend.identity import generate_cert`.
+- `python3 server.py` / `python3 client.py` no longer work
+  either. Use `warpsend ...` after install, or
+  `PYTHONPATH=src python -m warpsend ...` from a checkout.
+- Everything else is unchanged: same command, same flags,
+  same behaviour, all 10 tests pass.
+
 ## 1.3.0 -- 17 Nov 2026 (Phase 3: structure and pipeline)
 
 - **Package layout.** Flat modules moved to `src/warpsend/`:

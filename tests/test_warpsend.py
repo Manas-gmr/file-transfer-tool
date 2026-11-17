@@ -1,4 +1,4 @@
-"""WarpSend v1.3 tests -- run from the project directory:
+"""WarpSend v1.4 tests -- run from the project directory:
 
     python3 tests/test_warpsend.py
     python -m pytest tests/ -v
@@ -24,7 +24,6 @@ import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from warpsend.identity import generate_cert
 from warpsend.protocol import validate_header
@@ -326,24 +325,25 @@ def test_udp_transfer_and_state_reset():
     print("ok: UDP transfer + state reset after abandoned transfer")
 
 
-def test_package_layout_and_legacy_shims():
+def test_package_layout():
     import warpsend
 
-    assert warpsend.__version__ == "1.3.0"
+    assert warpsend.__version__ == "1.4.0"
     assert warpsend.PROTOCOL_VERSION == 2
-    # The old flat imports still work (they are thin shims now).
-    from client import send_tcp as legacy_send_tcp
-    from server import serve_tcp as legacy_serve_tcp
-    from utils import VERSION as legacy_version
-
-    assert legacy_send_tcp is send_tcp
-    assert legacy_serve_tcp is serve_tcp
-    assert legacy_version == "1.3.0"
-    print("ok: src/warpsend layout + legacy shims")
+    # The old flat modules are gone: importing one must fail,
+    # so a stale `python3 server.py` cannot silently run old code.
+    for stale in ("client", "server", "utils"):
+        try:
+            __import__(stale)
+        except ImportError:
+            pass
+        else:
+            raise AssertionError(f"stale top-level module {stale!r} still importable")
+    print("ok: src/warpsend layout, no stale flat modules")
 
 
 if __name__ == "__main__":
-    test_package_layout_and_legacy_shims()
+    test_package_layout()
     test_fresh_and_no_overwrite()
     test_resume()
     test_complete_part_finalised()
@@ -353,4 +353,4 @@ if __name__ == "__main__":
     test_corrupt_verdict_is_failure()
     test_validate_header()
     test_udp_transfer_and_state_reset()
-    print("all WarpSend v1.3 tests passed")
+    print("all WarpSend v1.4 tests passed")

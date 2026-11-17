@@ -1,4 +1,4 @@
-"""WarpSend -- a fast file-transfer CLI over TCP / UDP (v1.3).
+"""WarpSend -- a fast file-transfer CLI over TCP / UDP (v1.4).
 
 One command, two modes:
 
