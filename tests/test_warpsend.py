@@ -1,4 +1,4 @@
-"""WarpSend v1.9.2 tests -- run from the project directory:
+"""WarpSend v1.9.3 tests -- run from the project directory:
 
     python3 tests/test_warpsend.py
     python -m pytest tests/ -v
@@ -386,7 +386,7 @@ def test_udp_transfer_and_state_reset():
 def test_package_layout():
     import warpsend
 
-    assert warpsend.__version__ == "1.9.2"
+    assert warpsend.__version__ == "1.9.3"
     assert warpsend.PROTOCOL_VERSION == 3
     # The old flat modules are gone: importing one must fail,
     # so a stale `python3 server.py` cannot silently run old code.
@@ -442,7 +442,13 @@ def test_sender_cancel_keeps_part_and_server_alive():
         pass
     else:
         raise AssertionError("cancelled send did not raise TransferCancelled")
-    assert os.path.exists(part_path(outdir, "ws-cancel.bin")), ".part missing after cancel"
+    # The receiver creates the .part in its own thread; on a
+    # loaded or slow-scheduling machine it may not have done so
+    # yet when the sender raises, so wait for it briefly
+    # instead of assuming it is already there.
+    assert wait_for_file(part_path(outdir, "ws-cancel.bin"), timeout=5), (
+        ".part missing after cancel"
+    )
     # The server must still be alive for the next transfer.
     src2 = make_file("ws-after-cancel.txt", 5_000)
     assert send_tcp("127.0.0.1", port, src2), "server died after a cancelled transfer"
@@ -529,7 +535,11 @@ def test_peer_add_list_remove_roundtrip():
     add_peer(cfg, "laptop", "192.168.1.10", port=5000, mode="tcp")
     add_peer(cfg, "pi", "192.168.1.20", tls=True, fingerprint="ab" * 32)
     save_config(cfg, path)
-    assert oct(os.stat(path).st_mode & 0o777) == "0o600", "config file must be 0600"
+    if os.name != "nt":
+        # Windows has no POSIX permission bits: os.chmod(0o600)
+        # is a no-op there and the file stays 0o666, so the mode
+        # check only runs on POSIX.
+        assert oct(os.stat(path).st_mode & 0o777) == "0o600", "config file must be 0600"
     loaded = load_config(path)
     assert loaded["peers"]["laptop"] == {"host": "192.168.1.10", "port": 5000, "mode": "tcp"}
     assert loaded["peers"]["pi"]["tls"] is True
@@ -1150,4 +1160,4 @@ if __name__ == "__main__":
     test_tui_merge_peers()
     test_tui_target_for_peer()
     test_tui_app_send_end_to_end()
-    print("all WarpSend v1.9.2 tests passed")
+    print("all WarpSend v1.9.3 tests passed")

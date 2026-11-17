@@ -324,6 +324,10 @@ def start_announcer(instance, listen_host, port, mode="tcp", tls=False, fingerpr
                 data, addr = sock.recvfrom(4096)
             except TimeoutError:
                 continue
+            except ConnectionResetError:
+                # Windows: an ICMP "port unreachable" from a peer
+                # that went away. Transient noise -- keep listening.
+                continue
             except OSError:
                 break
             reply, unicast = answer_query(data, instance, hostname, ip, port, txt)
@@ -361,6 +365,10 @@ def browse(timeout: float = 3.0):
             try:
                 data, addr = sock.recvfrom(4096)
             except TimeoutError:
+                continue
+            except ConnectionResetError:
+                # Windows: an ICMP "port unreachable" from a peer
+                # that went away. Transient noise -- keep listening.
                 continue
             try:
                 msg = parse_message(data)

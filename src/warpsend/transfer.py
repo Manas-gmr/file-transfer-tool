@@ -608,6 +608,12 @@ def serve_udp(host, port, key=None, outdir=None, max_size=0, approve=None, annou
                             if part_file is not None:
                                 part_file.close()
                         break
+                    except ConnectionResetError:
+                        # Windows: an ICMP "port unreachable" from a
+                        # client that closed its socket surfaces
+                        # here. It is noise, not a reason to stop
+                        # listening -- ignore it and keep going.
+                        continue
                     if not packet:
                         continue  # empty datagram: ignore, no crash
                     ptype = packet[0]
@@ -939,7 +945,10 @@ def send_udp(host, port, path, key=None, cancel=None):
                 if reply == b"FAIL":
                     print("server rejected the header")
                     return False
-            except TimeoutError:
+            except (TimeoutError, ConnectionResetError):
+                # ConnectionResetError is the Windows form of a
+                # lost reply (ICMP port unreachable from a closed
+                # peer); treat it like a timeout and retry.
                 print(f"header: no ACK, resending (attempt {attempt + 2}/{MAX_RETRIES})")
         else:
             print(f"header: giving up after {MAX_RETRIES} tries -- server never ACKed it")
@@ -962,7 +971,7 @@ def send_udp(host, port, path, key=None, cancel=None):
                                 acked * CHUNK_UDP if acked < total else size, size, label="sending"
                             )
                             break
-                    except TimeoutError:
+                    except (TimeoutError, ConnectionResetError):
                         print(
                             f"\nchunk {seq}: no ACK, resending "
                             f"(attempt {attempt + 2}/{MAX_RETRIES})"
@@ -979,7 +988,7 @@ def send_udp(host, port, path, key=None, cancel=None):
                 reply = sock.recvfrom(64)[0].decode()
                 print("server says:", reply)
                 return reply == "SUCCESS"
-            except TimeoutError:
+            except (TimeoutError, ConnectionResetError):
                 print(f"EOF: no reply, resending (attempt {attempt + 2}/{MAX_RETRIES})")
         print("no final reply from server -- transfer outcome unknown, treating as failure")
         return False

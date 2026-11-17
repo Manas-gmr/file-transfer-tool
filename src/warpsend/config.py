@@ -8,7 +8,7 @@ instead of scattered through the code.
 
 import os
 
-VERSION = "1.9.2"
+VERSION = "1.9.3"
 PROTOCOL_VERSION = 3
 
 # Network defaults.

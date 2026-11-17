@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.9.3 -- 17 Nov 2026 (CI fix: Windows-only failures)
+
+- **CI run #8 failed on Windows only (3 tests).**
+  Ubuntu and macOS all passed. The three failures are
+  all Windows platform quirks, not product bugs:
+- **UDP `ConnectionResetError` (WinError 10054).** On
+  Windows, an ICMP "port unreachable" from a client that
+  closed its socket surfaces as `ConnectionResetError`
+  on the next `recvfrom` -- Linux silently ignores it.
+  In the UDP test the abandoned transfer's client socket
+  closes, the server's reply to it bounces, and the
+  server's `recvfrom` raised unhandled, killing the
+  server thread; the client's `recvfrom` then raised
+  too. Fix: `serve_udp` ignores the reset and keeps
+  listening, and `send_udp` treats it like a timeout
+  (retry) at all three `recvfrom` sites. Same guard
+  added to the mDNS announcer and `browse()`.
+- **Cancel test raced the receiver thread.** The test
+  asserted the `.part` exists the instant the sender
+  raised, but the receiver creates it in its own thread;
+  on Windows scheduling the test checked too early. Fix:
+  the test now waits up to 5 s for the `.part` instead
+  of asserting immediately.
+- **Config mode 0o600 is impossible on Windows.**
+  Windows has no POSIX permission bits, so
+  `os.chmod(0o600)` is a no-op and the file stays
+  0o666. Fix: the mode assertion only runs on POSIX
+  (`os.name != "nt"`).
+
 ## 1.9.2 -- 17 Nov 2026 (CI fix: discover prints a header)
 
 - **CI run #7 failed on one test: `test_cli_discover`.**
@@ -291,8 +320,8 @@ Migration notes (from 1.2.0):
 
 Release steps (maintainer, not automated):
 
-1. Tag the release: `git tag v1.9.2 && git push origin
-   v1.9.2` (or create the tag on the GitHub website --
+1. Tag the release: `git tag v1.9.3 && git push origin
+   v1.9.3` (or create the tag on the GitHub website --
    the GitHub app cannot create tags through the API).
 2. Add `.github/workflows/ci.yml` via the GitHub website
    or a git push from your own machine -- the app cannot
